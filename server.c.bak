@@ -1,0 +1,222 @@
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#define MAX_CLIENTS 10
+#define BUFFER_SIZE 4096
+#define PORT "8080"
+
+typedef struct {
+    int socket_fd;
+    char name[256];
+} Client;
+
+Client clients[MAX_CLIENTS];
+int client_count = 0;
+
+/**
+ * @brief broadcast a message to all clients except the sender
+ *
+ * @param[int] sender_fd the socket of the sender
+ * @param[string] msg message to send to all clients
+ */
+void broadcast_msg(int sender_fd, const char *msg) {
+    for (int i = 0; i < client_count; i++) {
+        if (clients[i].socket_fd != sender_fd) { // Exclude the sender
+            if (send(clients[i].socket_fd, msg, strlen(msg), 0) < 0) {
+                perror("send");
+            }
+        }
+    }
+}
+
+void remove_client(int client_fd) {
+    for (int i = 0; i < client_count; i++) {
+        if (clients[i].socket_fd == client_fd) {
+            close(clients[i].socket_fd);
+            for (int j = i; j < client_count - 1; j++) {
+                clients[j] =
+                    clients[j + 1]; // shift the remaining of the clients
+            }
+            client_count--;
+            break;
+        }
+    }
+}
+
+void handle_client_msg(int client_socket) {
+    char buffer[BUFFER_SIZE];
+    int bytes_received = recv(client_socket, buffer, BUFFER_SIZE - 1, 0);
+    printf("Bytes received: %d", bytes_received);
+
+    if (bytes_received <= 0) {
+        for (int i = 0; i < client_count; i++) {
+            if (clients[i].socket_fd == client_socket) {
+                char leave_msg[BUFFER_SIZE];
+                snprintf(leave_msg, BUFFER_SIZE, "%s has leave the chat room.\n", clients[i].name);
+                broadcast_msg(client_socket, leave_msg);
+                printf("%s disconnected\n", clients[i].name);
+                break;
+            }
+        }
+        remove_client(client_socket);
+    } else {
+        buffer[bytes_received] = '\0';
+        printf("%s %ld", buffer, strlen(buffer));
+
+        // Find client name
+        char client_name[256] = "Unknown";
+        for (int i = 0; i < client_count; i++) {
+            if (clients[i].socket_fd == client_socket) {
+                strcpy(client_name, clients[i].name);
+                break;
+            }
+        }
+
+        size_t name_len = strlen(client_name);
+        size_t total_len = name_len + 2 + bytes_received + 1;
+
+        char *formatted_msg = malloc(total_len);
+        if (formatted_msg == NULL) {
+            perror("malloc");
+            return;
+        }
+        snprintf(formatted_msg, total_len, "%s: %s", client_name, buffer);
+
+        broadcast_msg(client_socket, formatted_msg);
+        free(formatted_msg);
+    }
+}
+
+void handle_new_connection(int server_socket) {
+    struct sockaddr_storage client_addr;
+    socklen_t addr_size = sizeof client_addr;
+
+    int client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &addr_size);
+
+    if (client_socket == -1) {
+        perror("accept");
+        return;
+    }
+
+    if (client_count < MAX_CLIENTS) {
+        clients[client_count].socket_fd = client_socket;
+        snprintf(clients[client_count].name, sizeof(clients[client_count].name),
+                 "Client%d", client_count + 1);
+        char welcome_msg[BUFFER_SIZE];
+
+        snprintf(welcome_msg, sizeof(welcome_msg), "Welcome to the chat room: %s\n!", clients[client_count].name);
+        send(client_socket, welcome_msg, strlen(welcome_msg), 0);
+
+        char join_msg[BUFFER_SIZE];
+        snprintf(join_msg, sizeof join_msg, "%s has joined the room.\n", clients[client_count].name);
+        broadcast_msg(client_socket, join_msg);
+        client_count++;
+        printf("New connection established. Total clients: %d\n", client_count);
+    } else {
+        const char *msg = "Chat room is full.\n";
+        send(client_socket, msg, strlen(msg), 0);
+        close(client_socket);
+    }
+}
+
+int main() {
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+
+    struct addrinfo *bind_address;
+    int status = getaddrinfo(NULL, PORT, &hints, &bind_address);
+
+    if (status != 0) {
+        fprintf(stderr, "getaddrinfo error: %s\n", gai_strerror(status));
+        return 1;
+    }
+
+    int server_socket = socket(bind_address->ai_family, bind_address->ai_socktype, bind_address->ai_protocol);
+    if (server_socket == -1) {
+        perror("socket");
+        return 1;
+    }
+
+    int yes = 1;
+    if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes) ==
+        -1) {
+        perror("setsockopt");
+        return 1;
+    }
+
+    if (bind(server_socket, bind_address->ai_addr, bind_address->ai_addrlen) ==
+        -1) {
+        perror("bind");
+        return 1;
+    }
+
+    freeaddrinfo(bind_address);
+
+    if (listen(server_socket, 10) == -1) {
+        perror("listen");
+        return 1;
+    }
+
+    printf("Chat server started on port %s\n", PORT);
+
+    fd_set read_fds, master_fds;
+    int fdmax;
+
+    FD_ZERO(&master_fds);
+    FD_ZERO(&read_fds);
+
+    FD_SET(server_socket, &master_fds);
+    fdmax = server_socket;
+
+    while (1) {
+        read_fds = master_fds;
+        if (select(fdmax + 1, &read_fds, 0, 0, 0) == -1) {
+            perror("select");
+            return 1;
+        }
+        for (int i = 0; i <= fdmax; i++) {
+            if (FD_ISSET(i, &read_fds)) {
+                if (i == server_socket) { // new connection
+                    handle_new_connection(server_socket); // update clients
+                    if (client_count > 0) {
+                        FD_SET(clients[client_count - 1].socket_fd, &master_fds);
+                        if (clients[client_count - 1].socket_fd > fdmax) {
+                            fdmax = clients[client_count - 1].socket_fd;
+                        }
+                    }
+                } else {
+                    handle_client_msg(i);
+                    FD_CLR(i, &master_fds);
+                }
+            }
+        }
+
+        FD_ZERO(&master_fds);
+        FD_SET(server_socket, &master_fds);
+        fdmax = server_socket;
+
+        for (int i = 0; i < client_count; i++) {
+            FD_SET(clients[i].socket_fd, &master_fds);
+            if (clients[i].socket_fd > fdmax) {
+                fdmax = clients[i].socket_fd;
+            }
+        }
+    }
+
+    close(server_socket);
+    return 0;
+}

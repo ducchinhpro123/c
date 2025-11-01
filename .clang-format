@@ -1,0 +1,17 @@
+Language: Cpp
+IndentWidth: 4
+BasedOnStyle: LLVM
+BreakConstructorInitializers: BeforeColon
+UseTab: Never
+BreakBeforeBraces: Allman
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: true
+AllowShortLoopsOnASingleLine: true
+IndentCaseLabels: false
+ColumnLimit: 150
+AlignAfterOpenBracket: Align
+PointerAlignment: Right
+SpacesBeforeTrailingComments: 2
+SortIncludes: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
