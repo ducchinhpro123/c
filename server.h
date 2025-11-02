@@ -16,6 +16,8 @@
 #define PORT 8898
 #define BUFFER_SIZE 1024
 
+typedef void (*server_msg_cb)(const char *msg, int sender_fd, const char *username);
+
 typedef struct {
     int sock_fd;
     char username[256];
@@ -28,6 +30,7 @@ typedef struct {
     bool is_system;
 } ChatMessage;
 
+void server_set_msg_cb(server_msg_cb cb);
 bool init_server();
 void cleanup_server();
 bool is_server_running();

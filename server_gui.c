@@ -1,7 +1,11 @@
 #include "message.h"
 #include "server.h"
 #include "window.h"
-#include <raygui.h>
+#define RAYGUI_IMPLEMENTATION
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#include "raygui.h"
+#pragma GCC diagnostic pop
 #include <raylib.h>
 /* #include "server_gui.h" */
 
@@ -11,6 +15,9 @@ Message messages[MAX_MESSAGES];
 int message_count = 0;
 static bool edit_mode = false;
 static char text_buffer[MSG_BUFFER] = "";
+
+// Init message queue
+static MessageQueue mq = { 0 };
 
 bool debugging = false;
 
@@ -84,7 +91,7 @@ void text_input(bool is_connected)
  */
 void welcome_msg(Font custom_font)
 {
-    center_text_horizontally("Welcome to the SERVER!", 70, 20, RED, custom_font);
+    center_text_horizontally("NetApp Server v1.0!", 50, 20, RED, custom_font);
 }
 
 void panel_scroll_msg(Font custom_font)
@@ -105,7 +112,6 @@ void panel_scroll_msg(Font custom_font)
 
     // BEGIN SCISSOR MODE
     BeginScissorMode(panel_view.x, panel_view.y, panel_view.width, panel_view.height);
-    DrawCircle(panel_view.y + 400, panel_scroll.y + 500, 40, RED);
     /* for (int i = 0; i < 30; i++) { */
     /*     int y_pos_msg = panel_view.y + 10 + i * 40 + panel_scroll.y; */
     /*     int x_pos_msg = panel_view.x + 10 - panel_scroll.x; */
@@ -161,6 +167,11 @@ void introduction_window(Font custom_font)
     center_text_horizontally("There is nothing much to say; happy coding, and good luck!!!", 30, 310, RED, custom_font);
 }
 
+static void on_server_msg(const char *msg, int sender_fd, const char *username)
+{
+    add_message(&mq, username, msg);
+}
+
 int main()
 {
     const char *window_title = "C&F";
@@ -170,10 +181,10 @@ int main()
     Font inter_font = LoadFont("resources/fonts/static/Inter_18pt-Medium.ttf");
     Font hack_font_bold = LoadFont("resources/fonts/Hack-Bold.ttf");
 
-    MessageQueue mq = {0};
     init_message_queue(&mq);
     /* char *username = malloc(256); */
     bool is_connected = false;
+    server_set_msg_cb(on_server_msg);
 
     while (!WindowShouldClose())
     {

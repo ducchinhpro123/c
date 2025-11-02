@@ -1,5 +1,7 @@
 #include "client_network.h"
 #include <arpa/inet.h>
+#include <asm-generic/errno-base.h>
+#include <asm-generic/errno.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -23,7 +25,7 @@ void init_client_connection(ClientConnection *conn)
     memset(conn->username, 0, sizeof(conn->username));
 }
 
-int connect_to_server(ClientConnection *conn, const char *host, const char *port)
+int connect_to_server(ClientConnection *conn, const char *host, const char *port, const char *username)
 {
     struct addrinfo hints, *res, *p;
     memset(&hints, 0, sizeof(hints));
@@ -62,12 +64,32 @@ int connect_to_server(ClientConnection *conn, const char *host, const char *port
         freeaddrinfo(res);
         return -1;
     }
+
+    freeaddrinfo(res);
+    conn->connected = true;
+    // set username
+    snprintf(conn->username, sizeof(conn->username), "%s", username);
+
+    // set non-blocking mode
     int flags = fcntl(conn->socket_fd, F_GETFL, 0);
     fcntl(conn->socket_fd, F_SETFL, flags | O_NONBLOCK);
 
-    freeaddrinfo(res);
+    // Send username handshake to server
+    if (conn->username[0] != '\0')
+    {
+        char handshake[300];
+        snprintf(handshake, sizeof(handshake), "USERNAME:%s", conn->username);
+        ssize_t sent = send(conn->socket_fd, handshake, strlen(handshake), 0);
+        if (sent < 0)
+        {
+            TraceLog(LOG_WARNING, "Failed to send username handshake: %s", strerror(errno));
+        }
+        else
+        {
+            TraceLog(LOG_INFO, "Sent username handshake for '%s'", conn->username);
+        }
+    }
 
-    conn->connected = true;
     TraceLog(LOG_INFO, "Connected to %s:%s", host, port);
 
     return 0;
@@ -106,24 +128,26 @@ int send_msg(ClientConnection *conn, const char *msg)
 
 int recv_msg(ClientConnection *conn, char *buffer, int size)
 {
-    if (!conn->connected || conn->socket_fd == -1)
-    {
-        TraceLog(LOG_ERROR, "No connection");
-        return -1;
-    }
-
     ssize_t bytes_recv = recv(conn->socket_fd, buffer, size, 0);
     if (bytes_recv < 0)
     {
-        TraceLog(LOG_ERROR, "Recv failed");
+        // No data yet, keep the connection open
+        if (errno == EWOULDBLOCK || errno == EAGAIN)
+        {
+            return 0;
+        }
+
+        TraceLog(LOG_ERROR, "Recv failed: %s", strerror(errno));
         conn->connected = false;
         return -1;
     }
+
     if (bytes_recv == 0)
     {
         TraceLog(LOG_ERROR, "Server closed connection");
         conn->connected = false;
-        return 0;
+        close(conn->socket_fd);
+        return -1;
     }
 
     buffer[bytes_recv] = '\0';

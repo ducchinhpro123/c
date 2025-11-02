@@ -8,6 +8,12 @@ static int server_fd = -1;
 static Client clients[MAX_CLIENTS];
 static int client_count = 0;
 static bool server_running = false;
+static server_msg_cb g_on_msg_cb = NULL;
+
+void server_set_msg_cb(server_msg_cb cb)
+{
+    g_on_msg_cb = cb;
+}
 
 int get_client_count()
 {
@@ -18,7 +24,8 @@ Client* get_clients()
     return clients;
 }
 
-int server_accept_client() {
+int server_accept_client()
+{
     if (!server_running || server_fd == -1) { return -1; }
 
     struct sockaddr_in client_addr;
@@ -77,7 +84,8 @@ void cleanup_server() {
     server_running = false;
 }
 
-bool init_server() {
+bool init_server()
+{
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
     if (server_fd == -1) {
@@ -125,8 +133,26 @@ void server_recv_msgs()
         if (bytes_recv > 0)
         {
             buffer[bytes_recv] = '\0';
-            TraceLog(LOG_INFO, "Received message from client: %s", buffer);
+            // Handle simple username handshake: "USERNAME:<name>"
+            const char *prefix = "USERNAME:";
+            size_t prefix_len = strlen(prefix);
+            if (bytes_recv >= (int)prefix_len && strncmp(buffer, prefix, prefix_len) == 0)
+            {
+                const char *name = buffer + prefix_len;
+                if (*name)
+                {
+                    snprintf(clients[i].username, sizeof(clients[i].username), "%s", name);
+                    TraceLog(LOG_INFO, "Client %s set username to '%s'", clients[i].ip_addr, clients[i].username);
+                }
+                continue; // do not broadcast handshake
+            }
+
+            TraceLog(LOG_INFO, "Received a message from %s: %s", clients[i].username, buffer);
             server_broadcast_msg(buffer, fd);
+            if (g_on_msg_cb)
+            {
+                g_on_msg_cb(buffer, fd, clients[i].username);
+            }
         }
         else if (bytes_recv == 0)
         {

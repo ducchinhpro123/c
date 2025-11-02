@@ -17,7 +17,6 @@ typedef struct {
     Message messages[MAX_MESSAGES];
     int count;
     pthread_mutex_t mutex;
-
 } MessageQueue;
 
 void init_message_queue(MessageQueue *queue);

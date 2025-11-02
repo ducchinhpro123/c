@@ -1,21 +1,33 @@
+/* ----------------------------------------*
+           Author: Autumn Leaves           |
+*------------------------------------------*/
+
 #include "client_network.h"
 #include "message.h"
 #include "warning_dialog.h"
 #include "window.h"
 
-#include <raygui.h>
+#define RAYGUI_IMPLEMENTATION
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#include "raygui.h"
+#pragma GCC diagnostic pop
 #include <raylib.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 
-/* #include "server_gui.h" */
 
 #define FPS 60
+#define USERNAME_BUFFER 64
 
 Message messages[MAX_MESSAGES];
 int message_count = 0;
 static bool edit_mode = false;
 static char text_buffer[MSG_BUFFER] = "";
+
+// Init message queue
+static MessageQueue g_mq = { 0 };
 
 bool debugging = false;
 
@@ -96,7 +108,8 @@ void text_input(ClientConnection *conn)
             int bytes_sent = send_msg(conn, s);
             if (bytes_sent > 0)
             {
-                text_buffer[0] = '\0';
+                add_message(&g_mq, "me", s);
+                text_buffer[0] = '\0'; // reset
                 was_sent = true;
                 edit_mode = true;
             }
@@ -115,7 +128,7 @@ void text_input(ClientConnection *conn)
  */
 void welcome_msg(Font custom_font)
 {
-    center_text_horizontally("Welcome to the CLIENT!", 70, 20, RED, custom_font);
+    center_text_horizontally("NetApp Client v1.0!", 50, 20, RED, custom_font);
 }
 
 void panel_scroll_msg(Font custom_font)
@@ -136,13 +149,20 @@ void panel_scroll_msg(Font custom_font)
 
     // BEGIN SCISSOR MODE
     BeginScissorMode(panel_view.x, panel_view.y, panel_view.width, panel_view.height);
-    DrawCircle(panel_view.y + 400, panel_scroll.y + 500, 40, RED);
-    /* for (int i = 0; i < 30; i++) { */
-    /*     int y_pos_msg = panel_view.y + 10 + i * 40 + panel_scroll.y; */
-    /*     int x_pos_msg = panel_view.x + 10 - panel_scroll.x; */
-    /*     DrawTextEx(custom_font, TextFormat("Message %d: Hello from user", i), (Vector2)
-     * {x_pos_msg, y_pos_msg}, 16, 1, BLACK); */
-    /* } */
+    for (int i = 0; i < g_mq.count; i++)
+    {
+        int y_pos_msg = panel_view.y + 10 + i * 40 + panel_scroll.y;
+        int x_pos_msg = panel_view.x + 10 - panel_scroll.x;
+
+        DrawTextEx(
+            custom_font, 
+            TextFormat("%s: %s", g_mq.messages[i].sender, g_mq.messages[i].text), 
+            (Vector2){x_pos_msg, y_pos_msg}, 
+            16, 
+            1, 
+            BLACK
+        );
+    }
     EndScissorMode();
     // END SCISSOR MODE
 
@@ -157,11 +177,6 @@ void show_fps()
     DrawText(TextFormat("FPS: %d", GetFPS()), 50, 50, 30, RED);
 }
 
-// Enter username in here
-void input_username()
-{
-}
-
 /**
  * @brief Display an introduction or overview (purpose) of the application
  */
@@ -170,34 +185,46 @@ void introduction_window(Font custom_font)
     center_text_horizontally("Overview of this application!", 50, 100, RED, custom_font);
     center_text_horizontally("Hi, thank you for using this application. You are a peer in a LAN", 20, 150, RED, custom_font);
     center_text_horizontally("I made this application just for fun, so I hope you don't expect much from it.", 20, 230, RED, custom_font);
-    center_text_horizontally("If you made it here, you should know this app lets you chat and "
-                             "share files with other peers in a LAN.",
-                             20, 270, RED, custom_font);
-    center_text_horizontally("There is nothing much to say; happy coding, and good luck!!!", 30, 310, RED, custom_font);
+    center_text_horizontally("This app lets you chat and share files with other peers in a LAN.", 20, 270, RED, custom_font);
+    center_text_horizontally("There is nothing much to say; happy coding, and good luck!!!", 20, 310, RED, custom_font);
 }
 
-void connection_screen(Font font, int *port, char *server_ip, char *port_str, bool *is_connected, ClientConnection *conn)
+
+void connection_screen(int *port, char *server_ip, char *port_str, char *username, bool *is_connected, ClientConnection *conn)
 {
     static bool ip_edit_mode = false;
     static bool port_edit_mode = false;
+    static bool username_edit_mode = false;
 
     // Input server ip
     int label_width_host = MeasureText("Server IP:", 20);
     int label_width_port = MeasureText("Port number:", 20);
+    int label_width_username = MeasureText("Your username:", 20);
 
     int textbox_width = 100;
     int spacing = 10;
 
     int group_width_host = label_width_host + spacing + textbox_width;
     int group_width_port = label_width_port + spacing + textbox_width;
+    int group_width_username = label_width_username + spacing + textbox_width;
 
     int group_center_x = WINDOW_WIDTH / 2;
 
     int label_x_host = group_center_x - group_width_host / 2;
     int label_x_port = group_center_x - group_width_port / 2;
+    int label_x_username = group_center_x - group_width_username / 2;
 
     int textbox_x_host = label_x_host + label_width_host + spacing;
     int textbox_x_port = label_x_port + label_width_port + spacing + 10;
+    int textbox_x_username = label_x_username + label_width_username + spacing + 10;
+
+    // Input username
+    DrawText("Your username:", label_x_username, 405, 20, DARKGRAY);
+    if (GuiTextBox((Rectangle){textbox_x_username, 400, textbox_width, 30}, username, 30, username_edit_mode))
+    {
+        TraceLog(LOG_INFO, "username set to: %s", username);
+        username_edit_mode = !username_edit_mode;
+    }
 
     // Input host
     DrawText("Server IP:", label_x_host, 455, 20, DARKGRAY);
@@ -226,7 +253,22 @@ void connection_screen(Font font, int *port, char *server_ip, char *port_str, bo
         }
         else
         {
-            if (connect_to_server(conn, server_ip, port_str) == 0)
+            // Trimmed username
+            char tmp[USERNAME_BUFFER];
+            strncpy(tmp, username, USERNAME_BUFFER);
+            char *username_trimmed = tmp, *e = tmp + strlen(tmp);
+
+            while (*username_trimmed && (*username_trimmed == ' ' || *username_trimmed == '\t' || *username_trimmed == '\n' || *username_trimmed == '\r'))
+                username_trimmed++;
+            while (e > username_trimmed && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r'))
+                *--e = '\0';
+
+            if (strcmp(username_trimmed, "") == 0)
+            {
+                TraceLog(LOG_WARNING, "Invalid username");
+                show_error("Invalid username");
+            }
+            else if (connect_to_server(conn, server_ip, port_str, username_trimmed) == 0)
             {
                 *is_connected = true;
             }
@@ -242,17 +284,27 @@ void connection_screen(Font font, int *port, char *server_ip, char *port_str, bo
     }
 }
 
+void debug_mq()
+{
+    for (int i = 0; i < g_mq.count; i++)
+    {
+        TraceLog(LOG_INFO, "%s: %s (%d)", g_mq.messages[i].sender, g_mq.messages[i].text, i + 1);
+    }
+}
+
 int main()
 {
     const char *window_title = "C&F"; InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, window_title);
     SetTargetFPS(FPS);
     // Font custom_font = LoadFont("resources/fonts/IosevkaNerdFontMono-Regular.ttf");  // Iosevka Nerd Font
     Font inter_font = LoadFont("resources/fonts/static/Inter_18pt-Medium.ttf");
-    Font hack_font_bold = LoadFont("resources/fonts/Hack-Bold.ttf");
+    Font hack_font_bold = LoadFont("resources/fonts/BigBlueTerm437NerdFont-Regular.ttf");
 
     char server_ip[16] = "127.0.0.1";
     int server_port = 8898;
     char port_str[6] = "8898";
+    char username[USERNAME_BUFFER];
+    char message_recv[MSG_BUFFER];
 
     /* char *username = malloc(256); */
     bool is_connected = false;
@@ -261,9 +313,7 @@ int main()
     ClientConnection conn;
     init_client_connection(&conn);
 
-    // Init message queue
-    MessageQueue mq = { 0 };
-    init_message_queue(&mq);
+    init_message_queue(&g_mq);
 
     while (!WindowShouldClose())
     {
@@ -274,13 +324,24 @@ int main()
         if (!is_connected)
         {
             introduction_window(hack_font_bold);
-            connection_screen(hack_font_bold, &server_port, server_ip, port_str, &is_connected, &conn);
+            connection_screen(&server_port, server_ip, port_str, username, &is_connected, &conn);
         }
 
         if (is_connected)
         {
             panel_scroll_msg(inter_font);
             text_input(&conn);
+            ssize_t bytes_recv = recv_msg(&conn, message_recv, MSG_BUFFER);
+            if (bytes_recv > 0)
+            {
+                TraceLog(LOG_INFO, "Received: %s", message_recv);
+                add_message(&g_mq, username, message_recv);
+            }
+            else if (bytes_recv < 0)
+            {
+                is_connected = false;
+                show_error("Connection lost");
+            }
         }
         /* init_server_button(&is_connected); */
 

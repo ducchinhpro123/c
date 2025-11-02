@@ -12,7 +12,7 @@ typedef struct {
 // Initialize connection
 void init_client_connection(ClientConnection *conn);
 
-int connect_to_server(ClientConnection *conn, const char *host, const char *port);
+int connect_to_server(ClientConnection *conn, const char *host, const char *port, const char *username);
 
 int send_msg(ClientConnection *conn, const char *msg);
 

@@ -5,7 +5,7 @@
 #include "window.h"
 #include <stdio.h>
 #include <raylib.h>
-#include <raygui.h>
+#include "raygui.h"
 #include <stdbool.h>
 
 // Only declare types and function prototypes here

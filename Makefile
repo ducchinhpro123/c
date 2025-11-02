@@ -1,13 +1,13 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -I/usr/include
-LIBS = -lm -lraylib -lraygui -lpthread -ldl -lrt -lX11
+LIBS = -lm -lraylib -lpthread -ldl -lrt -lX11
 
 SERVER_TARGET = server_gui
 SERVER_SOURCE = server_gui.c server.c message.c
 
 
 CLIENT_TARGET = client_gui
-CLIENT_SOURCE = client_gui.c client.c warning_dialog.c client_network.c message.c
+CLIENT_SOURCE = client_gui.c warning_dialog.c client_network.c message.c
 
 all: $(SERVER_TARGET)
 
