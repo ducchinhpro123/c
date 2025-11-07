@@ -16,7 +16,7 @@
 #define PORT 8898
 #define BUFFER_SIZE 1024
 
-typedef void (*server_msg_cb)(const char *msg, int sender_fd, const char *username);
+typedef void (*server_msg_cb)(const char *msg, const char *username);
 
 typedef struct {
     int sock_fd;

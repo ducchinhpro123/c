@@ -1,6 +1,7 @@
 #include "message.h"
 #include "server.h"
 #include "window.h"
+#include <stdio.h>
 #define RAYGUI_IMPLEMENTATION
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
@@ -17,7 +18,7 @@ static bool edit_mode = false;
 static char text_buffer[MSG_BUFFER] = "";
 
 // Init message queue
-static MessageQueue mq = { 0 };
+static MessageQueue g_mq = { 0 };
 
 bool debugging = false;
 
@@ -53,11 +54,6 @@ void center_text_horizontally(const char *text, int font_size, int y, Color colo
     }
 }
 
-void send_msg(char msg[MSG_BUFFER])
-{
-    DrawText(msg, WINDOW_WIDTH / 2, WINDOW_HEIGHT / 2, 30, BLACK);
-}
-
 void text_input(bool is_connected)
 {
     if (!is_connected)
@@ -69,6 +65,7 @@ void text_input(bool is_connected)
     float box_height = 50;
     float x_pos = (WINDOW_WIDTH - box_width) / 2;
     float y_pos = (WINDOW_HEIGHT - box_height) - 10;
+    bool was_sent = false;
 
     /* GuiWindowBox(Rectangle bounds, const char *title); */
     // Input text
@@ -80,8 +77,34 @@ void text_input(bool is_connected)
     // Button to send text
     if (GuiButton((Rectangle){x_pos + box_width - ((box_width / 6) / 2), y_pos, box_width / 6, box_height}, "SEND"))
     {
-        send_msg(text_buffer);
-        // SEND MESSAGE
+        was_sent = true;
+    }
+
+    if (IsKeyPressed(KEY_ENTER) && !IsKeyDown(KEY_LEFT_SHIFT) && !IsKeyDown(KEY_RIGHT_SHIFT))
+    {
+        was_sent = true;
+    }
+
+    if (was_sent)
+    {
+        char tmp[MSG_BUFFER];
+        strncpy(tmp, text_buffer, MSG_BUFFER);
+        tmp[MSG_BUFFER - 1] = '\0';
+        // simple trim message
+        char *s = tmp, *e = tmp + strlen(tmp);
+        while (*s && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')) s++;
+        while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r')) *--e = '\0';
+
+        if (*s)
+        {
+            char formatted_msg[MSG_BUFFER + 9];
+            // We actually send the prefix SERVER.
+            snprintf(formatted_msg, sizeof(formatted_msg), "SERVER: %s", s);
+            server_broadcast_msg(formatted_msg, -1);
+            add_message(&g_mq, "SERVER", s);
+            memset(text_buffer, 0, sizeof(text_buffer));
+        }
+        was_sent = false;
     }
 }
 
@@ -100,6 +123,11 @@ void panel_scroll_msg(Font custom_font)
     int panel_width = 800;
     int panel_height = 700;
 
+    int font_size = 16;
+    int gap = 10;
+    int pad_x = 8;
+    int pad_y = 8;
+
     int x_pos = (WINDOW_WIDTH - panel_width) / 2;
     int y_pos = (WINDOW_HEIGHT - panel_height) / 2;
 
@@ -107,17 +135,20 @@ void panel_scroll_msg(Font custom_font)
     Rectangle panel_content_rec = {0, 0, panel_width - 15, 1200};
     Rectangle panel_view = {0};
 
+    int content_width = panel_width - 15 - 2 * pad_x;
+
     static Vector2 panel_scroll = {0, 0};
     GuiScrollPanel(panel_rec, "CHAT", panel_content_rec, &panel_scroll, &panel_view);
 
     // BEGIN SCISSOR MODE
     BeginScissorMode(panel_view.x, panel_view.y, panel_view.width, panel_view.height);
-    /* for (int i = 0; i < 30; i++) { */
-    /*     int y_pos_msg = panel_view.y + 10 + i * 40 + panel_scroll.y; */
-    /*     int x_pos_msg = panel_view.x + 10 - panel_scroll.x; */
-    /*     DrawTextEx(custom_font, TextFormat("Message %d: Hello from user", i), (Vector2) {x_pos_msg, y_pos_msg}, 16, 1, BLACK);
-     */
-    /* } */
+    for (int i = 0; i < g_mq.count; i++)
+    {
+        int x_pos_msg = panel_view.x + gap - panel_scroll.x;
+        int y_pos_msg = panel_view.y + gap + i * 40 + panel_scroll.y;
+
+        DrawTextEx(custom_font, TextFormat("%s: %s", g_mq.messages[i].sender, g_mq.messages[i].text), (Vector2){x_pos_msg, y_pos_msg}, font_size, 1, BLACK);
+    }
     EndScissorMode();
     // END SCISSOR MODE
 
@@ -130,11 +161,6 @@ void panel_scroll_msg(Font custom_font)
 void show_fps()
 {
     DrawText(TextFormat("FPS: %d", GetFPS()), 50, 50, 30, RED);
-}
-
-// Enter username in here
-void input_username()
-{
 }
 
 void init_server_button(bool *is_connected)
@@ -162,14 +188,14 @@ void introduction_window(Font custom_font)
     center_text_horizontally("Hi, thank you for using this application. You are running the server", 20, 150, RED, custom_font);
     center_text_horizontally(TextFormat("You are the host of this server and your port number is: %d", PORT), 20, 190, RED, custom_font);
     center_text_horizontally("I made this application just for fun, so I hope you don't expect much from it.", 20, 230, RED, custom_font);
-    center_text_horizontally("If you made it here, you should know this app lets you chat and share files with other peers in a LAN.", 20, 270, RED,
-                             custom_font);
+    center_text_horizontally("If you made it here, you should know this app lets you chat and share files with other peers in a LAN.", 20, 270, RED, custom_font);
     center_text_horizontally("There is nothing much to say; happy coding, and good luck!!!", 30, 310, RED, custom_font);
 }
 
-static void on_server_msg(const char *msg, int sender_fd, const char *username)
+static void on_server_msg(const char *msg, const char *username)
 {
-    add_message(&mq, username, msg);
+    TraceLog(LOG_INFO, "Add a message");
+    add_message(&g_mq, username, msg);
 }
 
 int main()
@@ -177,11 +203,11 @@ int main()
     const char *window_title = "C&F";
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, window_title);
     SetTargetFPS(FPS);
-    // Font custom_font = LoadFont("resources/fonts/IosevkaNerdFontMono-Regular.ttf");  // Iosevka Nerd Font
-    Font inter_font = LoadFont("resources/fonts/static/Inter_18pt-Medium.ttf");
+    Font custom_font = LoadFont("resources/fonts/IosevkaNerdFontMono-Regular.ttf");
+    // Font inter_font = LoadFont("resources/fonts/static/Inter_18pt-Medium.ttf");
     Font hack_font_bold = LoadFont("resources/fonts/Hack-Bold.ttf");
 
-    init_message_queue(&mq);
+    init_message_queue(&g_mq);
     /* char *username = malloc(256); */
     bool is_connected = false;
     server_set_msg_cb(on_server_msg);
@@ -194,28 +220,23 @@ int main()
 
         if (!is_connected)
         {
+            init_server_button(&is_connected);
             introduction_window(hack_font_bold);
-        }
-
-        init_server_button(&is_connected);
-
-        if (is_connected)
-        {  // Only display chat interface once user is connected
-            panel_scroll_msg(inter_font);
         }
 
         if (is_connected)
         {
             server_accept_client();
             server_recv_msgs();
+            panel_scroll_msg(custom_font);
         }
 
         // Display welcome mesasge at the center horizontally
-        welcome_msg(hack_font_bold);
+        // welcome_msg(hack_font_bold);
         text_input(is_connected);
         setting_button();
-
         debugging_button();
+
         if (debugging)
         {
             show_fps();

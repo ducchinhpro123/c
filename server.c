@@ -1,6 +1,8 @@
 #include "server.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <raylib.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 
@@ -65,7 +67,12 @@ int server_accept_client()
     strcpy(clients[client_count].ip_addr, inet_ntoa(client_addr.sin_addr));
 
     client_count ++;
-    TraceLog(LOG_WARNING, "Client connected from: %s (%d/%d)", clients[client_count - 1].ip_addr, client_count, MAX_CLIENTS);
+    char join_msg[512];
+    snprintf(join_msg, sizeof(join_msg), "SYSTEM: A new user has joined with ip: %s", clients[client_count - 1].ip_addr);
+
+    server_broadcast_msg(join_msg, client_fd);
+
+    // TraceLog(LOG_WARNING, "Client connected from: %s (%d/%d)", clients[client_count - 1].ip_addr, client_count, MAX_CLIENTS);
 
     return client_fd;
 
@@ -148,15 +155,35 @@ void server_recv_msgs()
             }
 
             TraceLog(LOG_INFO, "Received a message from %s: %s", clients[i].username, buffer);
-            server_broadcast_msg(buffer, fd);
-            if (g_on_msg_cb)
+            char *colon_pos = strchr(buffer, ':');
+            if (colon_pos != NULL)
             {
-                g_on_msg_cb(buffer, fd, clients[i].username);
+                char *msg_part = colon_pos + 1;
+                TraceLog(LOG_INFO, "Sending a message %s", buffer);
+                server_broadcast_msg(buffer, fd);
+
+                if (g_on_msg_cb)
+                {
+                    g_on_msg_cb(buffer, clients[i].username);
+                }
+            }
+            else
+            {
+                server_broadcast_msg(buffer, fd);
+                if (g_on_msg_cb)
+                {
+                    g_on_msg_cb(buffer, clients[i].username);
+                }
             }
         }
         else if (bytes_recv == 0)
         {
             TraceLog(LOG_INFO, "Client disconnected (%s)", clients[i].ip_addr);
+
+            char leave_msg[512];
+            snprintf(leave_msg, sizeof(leave_msg), "SYSTEM: User %s (%s) has left", clients[i].username, clients[i].ip_addr);
+            server_broadcast_msg(leave_msg, -1);  // -1 means broadcast to all clients
+
             close(fd);
             for (int j = i + 1; j < client_count; ++j) clients[j - 1] = clients[j];
             client_count--;
@@ -192,5 +219,4 @@ void server_broadcast_msg(const char *msg, int sender_fd)
             i--;
         }
     }
-    TraceLog(LOG_INFO, "I am going to broadcast this message: '%s' to other peers", msg);
 }

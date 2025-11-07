@@ -1,11 +1,12 @@
-/* ----------------------------------------*
-           Author: Autumn Leaves           |
-*------------------------------------------*/
+/*********************************************
+           Author: Autumn Leaves
+**********************************************/
 
 #include "client_network.h"
 #include "message.h"
 #include "warning_dialog.h"
 #include "window.h"
+#include <stdio.h>
 
 #define RAYGUI_IMPLEMENTATION
 #pragma GCC diagnostic push
@@ -68,7 +69,7 @@ void center_text_horizontally(const char *text, int font_size, int y, Color colo
 //     DrawText(msg, WINDOW_WIDTH / 2, WINDOW_HEIGHT / 2, 30, BLACK);
 // }
 
-void text_input(ClientConnection *conn)
+void text_input(ClientConnection *conn, const char *username)
 {
     float box_width = 500;
     float box_height = 50;
@@ -88,7 +89,7 @@ void text_input(ClientConnection *conn)
     {
         was_sent = true;
     }
-    if (IsKeyPressed(KEY_ENTER) && !IsKeyDown(KEY_LEFT_SHIFT) && !IsKeyDown(KEY_RIGHT_SHIFT))
+    if (IsKeyPressed(KEY_ENTER) && !IsKeyDown(KEY_LEFT_SHIFT) && !IsKeyDown(KEY_RIGHT_SHIFT) && strlen(text_buffer) > 0)
     {
         was_sent = true;
     }
@@ -100,18 +101,21 @@ void text_input(ClientConnection *conn)
         tmp[MSG_BUFFER - 1] = '\0';
         // simple trim message
         char *s = tmp, *e = tmp + strlen(tmp);
-        while (*s && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')) s++;
-        while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r')) *--e = '\0';
+        while (*s && (*s == ' ' || *s == '\t' || *s == '\r')) s++;
+        while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r')) *--e = '\0';
 
         if (*s)
         {
-            int bytes_sent = send_msg(conn, s);
+            char formatted_msg[MSG_BUFFER + 4];
+            snprintf(formatted_msg, sizeof(formatted_msg), "%s: %s", username, s);
+            int bytes_sent = send_msg(conn, formatted_msg);
             if (bytes_sent > 0)
             {
                 add_message(&g_mq, "me", s);
                 text_buffer[0] = '\0'; // reset
                 was_sent = true;
                 edit_mode = true;
+                TraceLog(LOG_INFO, "Sent: %s", formatted_msg);
             }
         }
         else
@@ -153,23 +157,10 @@ void panel_scroll_msg(Font custom_font)
     {
         int y_pos_msg = panel_view.y + 10 + i * 40 + panel_scroll.y;
         int x_pos_msg = panel_view.x + 10 - panel_scroll.x;
-
-        DrawTextEx(
-            custom_font, 
-            TextFormat("%s: %s", g_mq.messages[i].sender, g_mq.messages[i].text), 
-            (Vector2){x_pos_msg, y_pos_msg}, 
-            16, 
-            1, 
-            BLACK
-        );
+        DrawTextEx(custom_font, TextFormat("%s: %s", g_mq.messages[i].sender, g_mq.messages[i].text), (Vector2){x_pos_msg, y_pos_msg}, 21, 1, BLACK);
     }
     EndScissorMode();
     // END SCISSOR MODE
-
-    /* GuiSliderBar((Rectangle){ 590, 385, 145, 15}, "WIDTH", TextFormat("%i",
-     * (int)panel_content_rec.width), &panel_content_rec.width, 1, 2000); */
-    /* GuiSliderBar((Rectangle){ 590, 410, 145, 15 }, "HEIGHT", TextFormat("%i",
-     * (int)panel_content_rec.height), &panel_content_rec.height, 1, 2000); */
 }
 
 void show_fps()
@@ -220,7 +211,9 @@ void connection_screen(int *port, char *server_ip, char *port_str, char *usernam
 
     // Input username
     DrawText("Your username:", label_x_username, 405, 20, DARKGRAY);
-    if (GuiTextBox((Rectangle){textbox_x_username, 400, textbox_width, 30}, username, 30, username_edit_mode))
+
+    // int GuiTextBox(Rectangle bounds, char *text, int textSize, bool editMode)
+    if (GuiTextBox((Rectangle){textbox_x_username, 400, textbox_width, 30}, username, USERNAME_BUFFER, username_edit_mode))
     {
         TraceLog(LOG_INFO, "username set to: %s", username);
         username_edit_mode = !username_edit_mode;
@@ -296,14 +289,16 @@ int main()
 {
     const char *window_title = "C&F"; InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, window_title);
     SetTargetFPS(FPS);
-    // Font custom_font = LoadFont("resources/fonts/IosevkaNerdFontMono-Regular.ttf");  // Iosevka Nerd Font
-    Font inter_font = LoadFont("resources/fonts/static/Inter_18pt-Medium.ttf");
+    Font custom_font = LoadFont("resources/fonts/IosevkaNerdFontMono-Regular.ttf");
+    // Font inter_font = LoadFont("resources/fonts/static/Inter_18pt-Medium.ttf");
     Font hack_font_bold = LoadFont("resources/fonts/BigBlueTerm437NerdFont-Regular.ttf");
 
     char server_ip[16] = "127.0.0.1";
     int server_port = 8898;
     char port_str[6] = "8898";
     char username[USERNAME_BUFFER];
+    memset(username, 0, sizeof(username));
+
     char message_recv[MSG_BUFFER];
 
     /* char *username = malloc(256); */
@@ -329,13 +324,30 @@ int main()
 
         if (is_connected)
         {
-            panel_scroll_msg(inter_font);
-            text_input(&conn);
+            panel_scroll_msg(custom_font);
+            text_input(&conn, username);
+
             ssize_t bytes_recv = recv_msg(&conn, message_recv, MSG_BUFFER);
             if (bytes_recv > 0)
             {
-                TraceLog(LOG_INFO, "Received: %s", message_recv);
-                add_message(&g_mq, username, message_recv);
+                TraceLog(LOG_INFO, "Message received: %s", message_recv);
+                char *colon_pos = strchr(message_recv, ':');
+                if (colon_pos != NULL)
+                {
+                    char sender[256];
+                    size_t sender_len = colon_pos - message_recv;
+                    if (sender_len >= sizeof(sender)) sender_len = sizeof(sender) - 1;
+                    strncpy(sender, message_recv, sender_len);
+                    sender[sender_len] = '\0';
+
+                    char *msg_text = colon_pos + 1;
+                    while (*msg_text == ' ') msg_text ++; // skip spaces
+                    add_message(&g_mq, sender, msg_text);
+                }
+                else
+                {
+                    add_message(&g_mq, "unknown", message_recv);
+                }
             }
             else if (bytes_recv < 0)
             {
