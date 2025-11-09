@@ -76,12 +76,42 @@ void text_input(ClientConnection *conn, const char *username)
     float x_pos = (WINDOW_WIDTH - box_width) / 2;
     float y_pos = (WINDOW_HEIGHT - box_height) - 10;
     bool was_sent = false;
+    bool shift_enter_pressed = false; 
 
-    /* GuiWindowBox(Rectangle bounds, const char *title); */
-    // Input text
+    // Handle shift-enter for new lines before GuiTextBox to prevent focus loss
+    if (edit_mode && IsKeyPressed(KEY_ENTER))
+    {
+        if (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT))
+        {
+            size_t len = strlen(text_buffer);
+            if (len < MSG_BUFFER - 2)
+            {
+                TraceLog(LOG_INFO, "Detected new line");
+                text_buffer[len] = '\n';
+                text_buffer[len + 1] = '\0';
+                shift_enter_pressed = true;
+                // Prevent GuiTextBox from toggling edit_mode by consuming the enter key
+                edit_mode = true;
+            }
+        }
+        else
+        {
+            was_sent = true;
+        }
+    }
+
     if (GuiTextBox((Rectangle){x_pos - ((box_width / 6) / 2), y_pos, box_width, box_height}, text_buffer, MSG_BUFFER, edit_mode))
     {
-        edit_mode = !edit_mode;
+        // Only toggle if shift-enter wasn't just processed
+        if (!shift_enter_pressed)
+        {
+            edit_mode = !edit_mode;
+        }
+        else
+        {
+            // Reset the flag for next frame
+            shift_enter_pressed = false;
+        }
     }
 
     // Button to send text
@@ -89,12 +119,8 @@ void text_input(ClientConnection *conn, const char *username)
     {
         was_sent = true;
     }
-    if (IsKeyPressed(KEY_ENTER) && !IsKeyDown(KEY_LEFT_SHIFT) && !IsKeyDown(KEY_RIGHT_SHIFT) && strlen(text_buffer) > 0)
-    {
-        was_sent = true;
-    }
 
-    if (was_sent)
+    if (was_sent && strlen(text_buffer) > 0)
     {
         char tmp[MSG_BUFFER];
         strncpy(tmp, text_buffer, MSG_BUFFER);
@@ -135,11 +161,70 @@ void welcome_msg(Font custom_font)
     center_text_horizontally("NetApp Client v1.0!", 50, 20, RED, custom_font);
 }
 
+int calculate_wrapped_lines(Font font, const char *text, float font_size, float spacing, float max_width)
+{
+    int total_lines = 0;
+    char *text_cpy = strdup(text);
+    char *line = strtok(text_cpy, "\n");
+
+    while (line != NULL)
+    {
+        Vector2 line_size = MeasureTextEx(font, line, font_size, spacing);
+        int wrap_lines = (int)(line_size.x / max_width) + 1;
+        total_lines += wrap_lines;
+        line = strtok(NULL, "\n");
+    }
+
+    free(text_cpy);
+    return total_lines;
+}
+
+void draw_wrapped_text(Font font, const char *text, Vector2 pos, float font_size, float spacing, float max_width, Color color)
+{
+    char *text_cpy = strdup(text);
+    char *word = strtok(text_cpy, " ");
+    float cur_x = pos.x;
+    float cur_y = pos.y;
+
+    while (word != NULL)
+    {
+        char *next_word = strtok(NULL, " ");
+        char word_buffer[256];
+
+        if (next_word != NULL)
+        {
+            snprintf(word_buffer, sizeof(word_buffer), "%s ", word);
+        }
+        else
+        {
+            strcpy(word_buffer, word);
+        }
+
+        Vector2 word_size = MeasureTextEx(font, word_buffer, font_size, spacing);
+
+        if (cur_x + word_size.x > pos.x + max_width)
+        {
+            cur_x = pos.x; // reset it
+            cur_y += word_size.y + spacing;
+        }
+        DrawTextEx(font, word_buffer, (Vector2){cur_x, cur_y}, font_size, spacing, color);
+
+        cur_x += word_size.x;
+        word = next_word;
+    }
+
+    free(text_cpy);
+}
+
 void panel_scroll_msg(Font custom_font)
 {
     /* bool showContentArea = true; */
     int panel_width = 800;
     int panel_height = 700;
+
+    int font_size = 21;
+    float spacing = 1.0f;
+    float gap = 6.0f;
 
     int x_pos = (WINDOW_WIDTH - panel_width) / 2;
     int y_pos = (WINDOW_HEIGHT - panel_height) / 2;
@@ -151,13 +236,51 @@ void panel_scroll_msg(Font custom_font)
     static Vector2 panel_scroll = {0, 0};
     GuiScrollPanel(panel_rec, "CHAT", panel_content_rec, &panel_scroll, &panel_view);
 
+    float cumulative_height = 10;  // Top padding
     // BEGIN SCISSOR MODE
     BeginScissorMode(panel_view.x, panel_view.y, panel_view.width, panel_view.height);
     for (int i = 0; i < g_mq.count; i++)
     {
-        int y_pos_msg = panel_view.y + 10 + i * 40 + panel_scroll.y;
-        int x_pos_msg = panel_view.x + 10 - panel_scroll.x;
-        DrawTextEx(custom_font, TextFormat("%s: %s", g_mq.messages[i].sender, g_mq.messages[i].text), (Vector2){x_pos_msg, y_pos_msg}, 21, 1, BLACK);
+        const char *sender = g_mq.messages[i].sender;
+        const char *msg = g_mq.messages[i].text;
+
+        int pos_x_sender_label = panel_view.x + 10 - panel_scroll.x; // Position x for sender label
+
+        char sender_label[258];
+        snprintf(sender_label, sizeof(sender_label), "%s:", sender);
+        Vector2 sender_size = MeasureTextEx(custom_font, sender_label, font_size, spacing);
+        float avail_width = panel_view.width - sender_size.x - gap;
+        // Position x for message
+        float pos_x_msg = pos_x_sender_label + sender_size.x + gap;
+
+        int lines_count = calculate_wrapped_lines(custom_font, msg, font_size, spacing, avail_width);
+        float message_height = lines_count * (font_size + spacing);
+
+        // int y_pos_msg = panel_view.y + 10 + i * 40 + panel_scroll.y;
+        int y_pos_msg = panel_view.y + cumulative_height + panel_scroll.y;
+
+        // Append sender label
+        if (!strcmp(sender_label, "SYSTEM:"))
+        {
+            DrawTextEx(custom_font, sender_label, (Vector2){pos_x_sender_label, y_pos_msg}, font_size, spacing, RED);
+        }
+        else if (!strcmp(sender_label, "me:"))
+        {
+            DrawTextEx(custom_font, sender_label, (Vector2){pos_x_sender_label, y_pos_msg}, font_size, spacing, MAROON);
+        }
+        else
+        {
+            DrawTextEx(custom_font, sender_label, (Vector2){pos_x_sender_label, y_pos_msg}, font_size, spacing, GREEN);
+        }
+
+        // DrawTextEx(custom_font, msg, (Vector2){pos_x_msg, y_pos_msg}, font_size, spacing, BLACK);
+        draw_wrapped_text(custom_font, msg, (Vector2){pos_x_msg, y_pos_msg}, font_size, spacing, avail_width, BLACK);
+
+        cumulative_height += message_height + 15;  // 15px gap between messages
+
+        // EndScissorMode();
+        // DrawText(TextFormat("%d", lines_count), 200, 200, 30, RED);
+        // BeginScissorMode(panel_view.x, panel_view.y, panel_view.width, panel_view.height);
     }
     EndScissorMode();
     // END SCISSOR MODE
@@ -289,9 +412,8 @@ int main()
 {
     const char *window_title = "C&F"; InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, window_title);
     SetTargetFPS(FPS);
-    Font custom_font = LoadFont("resources/fonts/IosevkaNerdFontMono-Regular.ttf");
-    // Font inter_font = LoadFont("resources/fonts/static/Inter_18pt-Medium.ttf");
-    Font hack_font_bold = LoadFont("resources/fonts/BigBlueTerm437NerdFont-Regular.ttf");
+    Font comic_font = LoadFont("resources/fonts/ComicMono.ttf");
+    Font comic_font_bold = LoadFont("resources/fonts/ComicMono-Bold.ttf");
 
     char server_ip[16] = "127.0.0.1";
     int server_port = 8898;
@@ -318,13 +440,13 @@ int main()
 
         if (!is_connected)
         {
-            introduction_window(hack_font_bold);
+            introduction_window(comic_font);
             connection_screen(&server_port, server_ip, port_str, username, &is_connected, &conn);
         }
 
         if (is_connected)
         {
-            panel_scroll_msg(custom_font);
+            panel_scroll_msg(comic_font);
             text_input(&conn, username);
 
             ssize_t bytes_recv = recv_msg(&conn, message_recv, MSG_BUFFER);
@@ -362,7 +484,7 @@ int main()
         /* } */
 
         // Display welcome mesasge at the center horizontally
-        welcome_msg(hack_font_bold);
+        welcome_msg(comic_font_bold);
 
         setting_button();
 
