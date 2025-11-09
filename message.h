@@ -4,7 +4,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 
-#define MSG_BUFFER 256
+#define MSG_BUFFER 2048
 #define MAX_MESSAGES 200
 
 typedef struct {
