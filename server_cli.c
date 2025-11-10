@@ -12,9 +12,8 @@ static void handle_signal(int sig)
     g_running = 0;
 }
 
-static void on_server_msg(const char *msg, const char *username)
+static void on_server_msg(const char* msg, const char* username)
 {
-    // Basic console log for messages
     printf("%s: %s\n", username, msg);
     fflush(stdout);
 }
@@ -26,8 +25,7 @@ int main(void)
 
     server_set_msg_cb(on_server_msg);
 
-    if (!init_server())
-    {
+    if (!init_server()) {
         fprintf(stderr, "Failed to initialize server on port %d\n", PORT);
         return EXIT_FAILURE;
     }
@@ -37,14 +35,12 @@ int main(void)
 
     int prev_client_count = get_client_count();
 
-    while (g_running)
-    {
+    while (g_running) {
         server_accept_client();
         server_recv_msgs();
 
         int cur_client_count = get_client_count();
-        if (cur_client_count != prev_client_count)
-        {
+        if (cur_client_count != prev_client_count) {
             printf("Connected clients: %d\n", cur_client_count);
             fflush(stdout);
             prev_client_count = cur_client_count;
@@ -59,4 +55,3 @@ int main(void)
     cleanup_server();
     return EXIT_SUCCESS;
 }
-

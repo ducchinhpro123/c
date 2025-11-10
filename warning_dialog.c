@@ -9,9 +9,9 @@ typedef struct
     char title[128];
 } WarningDialog;
 
-static WarningDialog warning_dialog = {0};
+static WarningDialog warning_dialog = { 0 };
 
-void show_warning(const char *title, const char *msg, WarningType type)
+void show_warning(const char* title, const char* msg, WarningType type)
 {
     warning_dialog.active = true;
     strncpy(warning_dialog.title, title, 127);
@@ -24,7 +24,8 @@ void show_warning(const char *title, const char *msg, WarningType type)
 
 void draw_warning_dialog(void)
 {
-    if (warning_dialog.active == false) return;
+    if (warning_dialog.active == false)
+        return;
     int text_width = MeasureText(warning_dialog.msg, 16);
     int lines = (text_width / 400) + 1;
 
@@ -38,11 +39,10 @@ void draw_warning_dialog(void)
         window_height
     };
 
-    char *icon;
+    char* icon;
     Color titleColor = BLACK;
 
-    switch (warning_dialog.type)
-    {
+    switch (warning_dialog.type) {
     case WARNING_TYPE_INFO:
         icon = "#142#";
         titleColor = BLUE;
@@ -72,29 +72,28 @@ void draw_warning_dialog(void)
 
     // Reset color
     GuiSetStyle(DEFAULT, TEXT_COLOR_NORMAL, ColorToInt(BLACK));
-    if (result >= 0)
-    {
+    if (result >= 0) {
         warning_dialog.active = false;
         TraceLog(LOG_WARNING, "warning_dialog.active=%s", warning_dialog.active == true ? "true" : "false");
     }
 }
 
-void show_error(const char *msg)
+void show_error(const char* msg)
 {
     show_warning("ERROR", msg, WARNING_TYPE_ERROR);
 }
 
-void show_info(const char *msg)
+void show_info(const char* msg)
 {
     show_warning("INFO", msg, WARNING_TYPE_INFO);
 }
 
-void show_success(const char *msg)
+void show_success(const char* msg)
 {
     show_warning("SUCCESS", msg, WARNING_TYPE_SUCCESS);
 }
 
-void show_warning_msg(const char *msg)
+void show_warning_msg(const char* msg)
 {
     show_warning("WARNING", msg, WARNING_TYPE_WARNING);
 }

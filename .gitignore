@@ -1,3 +1,9 @@
 # Ignore built executables
 /client_gui
 /server_gui
+/server
+*.log
+*.bak
+server_gui
+client_gui
+server

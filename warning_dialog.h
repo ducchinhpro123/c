@@ -1,12 +1,12 @@
 #ifndef WARNING_DIALOG_H
 #define WARNING_DIALOG_H
 
-#include <string.h>
-#include "window.h"
-#include <stdio.h>
-#include <raylib.h>
 #include "raygui.h"
+#include "window.h"
+#include <raylib.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
 
 // Only declare types and function prototypes here
 typedef enum {
@@ -17,11 +17,11 @@ typedef enum {
 } WarningType;
 
 // Function declarations only
-void show_warning(const char *title, const char *msg, WarningType type);
+void show_warning(const char* title, const char* msg, WarningType type);
 void draw_warning_dialog(void);
-void show_error(const char *message);
-void show_info(const char *message);
-void show_success(const char *message);
-void show_warning_msg(const char *message);
+void show_error(const char* message);
+void show_info(const char* message);
+void show_success(const char* message);
+void show_warning_msg(const char* message);
 
 #endif // WARNING_DIALOG_H

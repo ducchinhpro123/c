@@ -24,40 +24,34 @@ bool debugging = false;
 
 void debugging_button()
 {
-    if (GuiButton((Rectangle){WINDOW_WIDTH - 80, 40, 80, 20}, "#152#Debugging"))
-    {
+    if (GuiButton((Rectangle) { WINDOW_WIDTH - 80, 40, 80, 20 }, "#152#Debugging")) {
         debugging = !debugging;
     }
 }
 
 void setting_button()
 {
-    if (GuiButton((Rectangle){WINDOW_WIDTH - 70, 10, 70, 20}, "#142#Settings"))
-    {
+    if (GuiButton((Rectangle) { WINDOW_WIDTH - 70, 10, 70, 20 }, "#142#Settings")) {
         // TODO: handle setting button
     }
 }
 
-void center_text_horizontally(const char *text, int font_size, int y, Color color, Font custom_font)
+void center_text_horizontally(const char* text, int font_size, int y, Color color, Font custom_font)
 {
-    if (custom_font.baseSize == 0)
-    {
+    if (custom_font.baseSize == 0) {
         int text_width = MeasureText(text, font_size);
         int x = (WINDOW_WIDTH - text_width) / 2;
         DrawText(text, x, y, font_size, color);
-    }
-    else
-    {
+    } else {
         Vector2 text_pos = MeasureTextEx(custom_font, text, font_size, 1);
         int x = (WINDOW_WIDTH - text_pos.x) / 2;
-        DrawTextEx(custom_font, text, (Vector2){x, y}, font_size, 1, color);
+        DrawTextEx(custom_font, text, (Vector2) { x, y }, font_size, 1, color);
     }
 }
 
 void text_input(bool is_connected)
 {
-    if (!is_connected)
-    {
+    if (!is_connected) {
         return;
     }
 
@@ -69,34 +63,31 @@ void text_input(bool is_connected)
 
     /* GuiWindowBox(Rectangle bounds, const char *title); */
     // Input text
-    if (GuiTextBox((Rectangle){x_pos - ((box_width / 6) / 2), y_pos, box_width, box_height}, text_buffer, MSG_BUFFER, edit_mode))
-    {
+    if (GuiTextBox((Rectangle) { x_pos - ((box_width / 6) / 2), y_pos, box_width, box_height }, text_buffer, MSG_BUFFER, edit_mode)) {
         edit_mode = !edit_mode;
     }
 
     // Button to send text
-    if (GuiButton((Rectangle){x_pos + box_width - ((box_width / 6) / 2), y_pos, box_width / 6, box_height}, "SEND"))
-    {
+    if (GuiButton((Rectangle) { x_pos + box_width - ((box_width / 6) / 2), y_pos, box_width / 6, box_height }, "SEND")) {
         was_sent = true;
     }
 
-    if (IsKeyPressed(KEY_ENTER) && !IsKeyDown(KEY_LEFT_SHIFT) && !IsKeyDown(KEY_RIGHT_SHIFT))
-    {
+    if (IsKeyPressed(KEY_ENTER) && !IsKeyDown(KEY_LEFT_SHIFT) && !IsKeyDown(KEY_RIGHT_SHIFT)) {
         was_sent = true;
     }
 
-    if (was_sent)
-    {
+    if (was_sent) {
         char tmp[MSG_BUFFER];
         strncpy(tmp, text_buffer, MSG_BUFFER);
         tmp[MSG_BUFFER - 1] = '\0';
         // simple trim message
         char *s = tmp, *e = tmp + strlen(tmp);
-        while (*s && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')) s++;
-        while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r')) *--e = '\0';
+        while (*s && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r'))
+            s++;
+        while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r'))
+            *--e = '\0';
 
-        if (*s)
-        {
+        if (*s) {
             char formatted_msg[MSG_BUFFER + 9];
             // We actually send the prefix SERVER.
             snprintf(formatted_msg, sizeof(formatted_msg), "SERVER: %s", s);
@@ -131,23 +122,22 @@ void panel_scroll_msg(Font custom_font)
     int x_pos = (WINDOW_WIDTH - panel_width) / 2;
     int y_pos = (WINDOW_HEIGHT - panel_height) / 2;
 
-    Rectangle panel_rec = {x_pos, y_pos, panel_width, panel_height};  // The position of pannel
-    Rectangle panel_content_rec = {0, 0, panel_width - 15, 1200};
-    Rectangle panel_view = {0};
+    Rectangle panel_rec = { x_pos, y_pos, panel_width, panel_height }; // The position of pannel
+    Rectangle panel_content_rec = { 0, 0, panel_width - 15, 1200 };
+    Rectangle panel_view = { 0 };
 
     int content_width = panel_width - 15 - 2 * pad_x;
 
-    static Vector2 panel_scroll = {0, 0};
+    static Vector2 panel_scroll = { 0, 0 };
     GuiScrollPanel(panel_rec, "CHAT", panel_content_rec, &panel_scroll, &panel_view);
 
     // BEGIN SCISSOR MODE
     BeginScissorMode(panel_view.x, panel_view.y, panel_view.width, panel_view.height);
-    for (int i = 0; i < g_mq.count; i++)
-    {
+    for (int i = 0; i < g_mq.count; i++) {
         int x_pos_msg = panel_view.x + gap - panel_scroll.x;
         int y_pos_msg = panel_view.y + gap + i * 40 + panel_scroll.y;
 
-        DrawTextEx(custom_font, TextFormat("%s: %s", g_mq.messages[i].sender, g_mq.messages[i].text), (Vector2){x_pos_msg, y_pos_msg}, font_size, 1, BLACK);
+        DrawTextEx(custom_font, TextFormat("%s: %s", g_mq.messages[i].sender, g_mq.messages[i].text), (Vector2) { x_pos_msg, y_pos_msg }, font_size, 1, BLACK);
     }
     EndScissorMode();
     // END SCISSOR MODE
@@ -163,17 +153,13 @@ void show_fps()
     DrawText(TextFormat("FPS: %d", GetFPS()), 50, 50, 30, RED);
 }
 
-void init_server_button(bool *is_connected)
+void init_server_button(bool* is_connected)
 {
-    if (GuiButton((Rectangle){(WINDOW_WIDTH - 130) / 2.0, WINDOW_HEIGHT / 2.0, 130, 50}, "INIT THE SERVER"))
-    {
+    if (GuiButton((Rectangle) { (WINDOW_WIDTH - 130) / 2.0, WINDOW_HEIGHT / 2.0, 130, 50 }, "INIT THE SERVER")) {
         init_server();
-        if (is_server_running())
-        {
+        if (is_server_running()) {
             *is_connected = true;
-        }
-        else
-        {
+        } else {
             *is_connected = false;
         }
     }
@@ -192,7 +178,7 @@ void introduction_window(Font custom_font)
     center_text_horizontally("There is nothing much to say; happy coding, and good luck!!!", 30, 310, RED, custom_font);
 }
 
-static void on_server_msg(const char *msg, const char *username)
+static void on_server_msg(const char* msg, const char* username)
 {
     TraceLog(LOG_INFO, "Add a message");
     add_message(&g_mq, username, msg);
@@ -200,7 +186,7 @@ static void on_server_msg(const char *msg, const char *username)
 
 int main()
 {
-    const char *window_title = "C&F";
+    const char* window_title = "C&F";
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, window_title);
     SetTargetFPS(FPS);
     Font custom_font = LoadFont("resources/fonts/IosevkaNerdFontMono-Regular.ttf");
@@ -212,20 +198,17 @@ int main()
     bool is_connected = false;
     server_set_msg_cb(on_server_msg);
 
-    while (!WindowShouldClose())
-    {
+    while (!WindowShouldClose()) {
         ClearBackground(RAYWHITE);
 
         BeginDrawing();
 
-        if (!is_connected)
-        {
+        if (!is_connected) {
             init_server_button(&is_connected);
             introduction_window(hack_font_bold);
         }
 
-        if (is_connected)
-        {
+        if (is_connected) {
             server_accept_client();
             server_recv_msgs();
             panel_scroll_msg(custom_font);
@@ -237,8 +220,7 @@ int main()
         setting_button();
         debugging_button();
 
-        if (debugging)
-        {
+        if (debugging) {
             show_fps();
             DrawText(TextFormat("is server running = %s", is_server_running() == true ? "true" : "false"), 10, 10, 30, RED);
         }

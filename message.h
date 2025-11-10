@@ -19,9 +19,9 @@ typedef struct {
     pthread_mutex_t mutex;
 } MessageQueue;
 
-void init_message_queue(MessageQueue *queue);
-void add_message(MessageQueue *queue, const char *sender, const char *text);
-Message get_message(MessageQueue *queue, int index);
-int get_message_count(MessageQueue *queue);
+void init_message_queue(MessageQueue* queue);
+void add_message(MessageQueue* queue, const char* sender, const char* text);
+Message get_message(MessageQueue* queue, int index);
+int get_message_count(MessageQueue* queue);
 
 #endif

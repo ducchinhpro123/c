@@ -1,22 +1,22 @@
 #ifndef SERVER_H
 #define SERVER_H
 
+#include <arpa/inet.h> // inet_addr()
+#include <errno.h>
 #include <fcntl.h>
-#include <arpa/inet.h>  // inet_addr()
 #include <netinet/in.h> // sockaddr_in
+#include <raylib.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
-#include <errno.h>
-#include <raylib.h>
 #include <sys/socket.h> // socket()
-#include <unistd.h>     // close()
+#include <unistd.h> // close()
 
 #define MAX_CLIENTS 100
 #define PORT 8898
 #define BUFFER_SIZE 1024
 
-typedef void (*server_msg_cb)(const char *msg, const char *username);
+typedef void (*server_msg_cb)(const char* msg, const char* username);
 
 typedef struct {
     int sock_fd;
@@ -36,7 +36,7 @@ void cleanup_server();
 bool is_server_running();
 int server_accept_client();
 void server_recv_msgs();
-void server_broadcast_msg(const char *msg, int sender_fd);
+void server_broadcast_msg(const char* msg, int sender_fd);
 int get_client_count();
 Client* get_clients();
 
