@@ -568,11 +568,9 @@ int main()
                         }
 
                         packets_processed++;
-                        TraceLog(LOG_INFO, "Processing packet %d from received buffer", packets_processed);
 
                         // Process this complete packet
                         if (!strncmp(file_marker, "FILE:", 5)) {
-                            TraceLog(LOG_INFO, "Received a file");
                             FileTransfer* ft = NULL;
 
                             char temp_filename[MAX_FILENAME];
@@ -594,10 +592,7 @@ int main()
                             unsigned char* chunk_data;
                             size_t chunk_size;
 
-                            TraceLog(LOG_INFO, "Parsing a file packet.");
                             if (parse_file_packet(file_marker, ft, &chunk_data, &chunk_size)) {
-                                TraceLog(LOG_INFO, "parse_file_packet returned successfully, chunk_size=%zu", chunk_size);
-
                                 // Extract chunk index from packet
                                 const char* parse_start = file_marker + 5; // Skip "FILE:"
                                 const char* pos = parse_start;
@@ -637,7 +632,6 @@ int main()
                                 temp[len] = '\0';
 
                                 int chunk_index = atoi(temp);
-                                TraceLog(LOG_INFO, "Extracted chunk_index=%d", chunk_index);
 
                                 // Validate file handle
                                 if (ft->file_handle == NULL) {
@@ -697,14 +691,11 @@ int main()
                         packet_start = packet_end + 1;
                     }
 
-                    TraceLog(LOG_INFO, "Processed %d FILE packets from received buffer", packets_processed);
-
                     // Move any remaining incomplete data to start of buffer
                     size_t remaining = buffer_end - packet_start;
                     if (remaining > 0 && packet_start != recv_buffer) {
                         memmove(recv_buffer, packet_start, remaining);
                         buffer_len = remaining;
-                        TraceLog(LOG_INFO, "Kept %zu bytes of incomplete packet for next iteration", remaining);
                     } else if (remaining == 0) {
                         buffer_len = 0;
                     } else {

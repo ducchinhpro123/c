@@ -245,8 +245,6 @@ static int base64_char_value(char c)
 
 unsigned char* base64_decode(const char* data, size_t input_length, size_t* output_length)
 {
-    TraceLog(LOG_INFO, "base64_decode: input_length=%zu", input_length);
-    
     if (data == NULL || input_length == 0) {
         TraceLog(LOG_ERROR, "base64_decode: NULL or empty input");
         *output_length = 0;
@@ -262,8 +260,6 @@ unsigned char* base64_decode(const char* data, size_t input_length, size_t* outp
         padding++;
     }
 
-    TraceLog(LOG_INFO, "base64_decode: effective_length=%zu, padding=%zu", effective_length, padding);
-
     // Allocate maximum possible size first
     // Every 4 input chars can produce up to 3 output bytes
     size_t max_output = ((input_length + 3) / 4) * 3;
@@ -273,7 +269,6 @@ unsigned char* base64_decode(const char* data, size_t input_length, size_t* outp
         *output_length = 0;
         return NULL;
     }
-    TraceLog(LOG_INFO, "base64_decode: allocated %zu bytes", max_output);
 
     size_t i = 0;  // Input position
     size_t j = 0;  // Output position
@@ -330,7 +325,6 @@ unsigned char* base64_decode(const char* data, size_t input_length, size_t* outp
 
     // Set actual output length (j = bytes actually written)
     *output_length = j;
-    TraceLog(LOG_INFO, "base64_decode: decoded %zu bytes (max was %zu)", j, max_output);
     
     // Optionally shrink buffer to actual size (not necessary but cleaner)
     if (j < max_output) {
@@ -340,7 +334,6 @@ unsigned char* base64_decode(const char* data, size_t input_length, size_t* outp
         }
     }
 
-    TraceLog(LOG_INFO, "base64_decode: returning decoded buffer");
     return decoded;
 }
 
