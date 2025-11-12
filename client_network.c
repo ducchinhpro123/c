@@ -87,6 +87,42 @@ int connect_to_server(ClientConnection* conn, const char* host, const char* port
     // connect(int fd, const struct sockaddr *addr, socklen_t len);
 }
 
+// Helper function: Send all data, handling partial sends and EAGAIN
+static ssize_t send_all(int socket_fd, const char* data, size_t len)
+{
+    size_t total_sent = 0;
+    int retry_count = 0;
+    const int MAX_RETRIES = 50;
+    
+    while (total_sent < len) {
+        ssize_t bytes_sent = send(socket_fd, data + total_sent, len - total_sent, 0);
+        
+        if (bytes_sent < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // Socket buffer full, wait and retry
+                retry_count++;
+                if (retry_count > MAX_RETRIES) {
+                    TraceLog(LOG_ERROR, "Max retries reached, sent %zu/%zu bytes", total_sent, len);
+                    return total_sent > 0 ? (ssize_t)total_sent : -1;
+                }
+                
+                // Exponential backoff: wait longer each retry
+                usleep(1000 * (1 << (retry_count / 10))); // 1ms, 2ms, 4ms, 8ms...
+                continue;
+            } else {
+                // Real error
+                TraceLog(LOG_ERROR, "Send error after %zu bytes: %s", total_sent, strerror(errno));
+                return total_sent > 0 ? (ssize_t)total_sent : -1;
+            }
+        }
+        
+        total_sent += bytes_sent;
+        retry_count = 0; // Reset retry counter on successful send
+    }
+    
+    return (ssize_t)total_sent;
+}
+
 int send_msg(ClientConnection* conn, const char* msg)
 {
     if (!conn->connected || conn->socket_fd == -1) {
@@ -95,20 +131,20 @@ int send_msg(ClientConnection* conn, const char* msg)
     }
 
     size_t len = strlen(msg);
-
-    int bytes_sent = send(conn->socket_fd, msg, len, 0);
+    ssize_t bytes_sent = send_all(conn->socket_fd, msg, len);
 
     if (bytes_sent < 0) {
-        TraceLog(LOG_ERROR, "Failed to send message: %s", strerror(errno));
+        TraceLog(LOG_ERROR, "Failed to send message");
         conn->connected = false;
         return -1;
     } else if ((size_t)bytes_sent < len) {
-        TraceLog(LOG_WARNING, "Only sent %d of %d bytes", bytes_sent, len);
+        TraceLog(LOG_WARNING, "Only sent %zd of %zu bytes", bytes_sent, len);
+        return (int)bytes_sent;
     } else {
-        TraceLog(LOG_INFO, "Sent: %d bytes", bytes_sent);
+        TraceLog(LOG_INFO, "Sent: %zd bytes", bytes_sent);
     }
 
-    return bytes_sent;
+    return (int)bytes_sent;
 }
 
 int recv_msg(ClientConnection* conn, char* buffer, int size)

@@ -11,7 +11,7 @@ SERVER_CLI_SOURCE = server_cli.c server.c message.c
 
 
 CLIENT_TARGET = client_gui
-CLIENT_SOURCE = client_gui.c warning_dialog.c client_network.c message.c
+CLIENT_SOURCE = client_gui.c warning_dialog.c client_network.c message.c file_transfer.c
 
 all: $(SERVER_TARGET) $(CLIENT_TARGET)
 

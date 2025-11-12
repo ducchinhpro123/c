@@ -12,25 +12,20 @@ static void handle_signal(int sig)
     g_running = 0;
 }
 
-static void on_server_msg(const char* msg, const char* username)
-{
-    printf("%s: %s\n", username, msg);
-    fflush(stdout);
-}
-
 int main(void)
 {
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
 
-    server_set_msg_cb(on_server_msg);
+    // No message callback - server runs silently, just relays messages
+    server_set_msg_cb(NULL);
 
     if (!init_server()) {
         fprintf(stderr, "Failed to initialize server on port %d\n", PORT);
         return EXIT_FAILURE;
     }
 
-    printf("Server running on port %d (headless). Press Ctrl+C to stop.\n", PORT);
+    printf("Server running on port %d. Press Ctrl+C to stop.\n", PORT);
     fflush(stdout);
 
     int prev_client_count = get_client_count();
@@ -43,6 +38,7 @@ int main(void)
         if (cur_client_count != prev_client_count) {
             printf("Connected clients: %d\n", cur_client_count);
             fflush(stdout);
+
             prev_client_count = cur_client_count;
         }
 

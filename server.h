@@ -14,7 +14,8 @@
 
 #define MAX_CLIENTS 100
 #define PORT 8898
-#define BUFFER_SIZE 1024
+// #define BUFFER_SIZE 1024
+#define BUFFER_SIZE 65536 // for Base64 encoded
 
 typedef void (*server_msg_cb)(const char* msg, const char* username);
 

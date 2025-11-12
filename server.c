@@ -133,46 +133,56 @@ bool init_server()
 void server_recv_msgs()
 {
     for (int i = 0; i < client_count; ++i) {
-        char buffer[BUFFER_SIZE];
+        // Increase buffer size for large file packets
+        char buffer[BUFFER_SIZE]; // 16KB buffer
         int fd = clients[i].sock_fd;
         int bytes_recv = recv(fd, buffer, sizeof(buffer) - 1, 0);
 
         if (bytes_recv > 0) {
             buffer[bytes_recv] = '\0';
-            // Handle simple username handshake: "USERNAME:<name>"
+
+            // Handle username handshake
             const char* prefix = "USERNAME:";
             size_t prefix_len = strlen(prefix);
             if (bytes_recv >= (int)prefix_len && strncmp(buffer, prefix, prefix_len) == 0) {
                 const char* name = buffer + prefix_len;
                 if (*name) {
                     snprintf(clients[i].username, sizeof(clients[i].username), "%s", name);
-                    TraceLog(LOG_INFO, "Client %s set username to '%s'", clients[i].ip_addr, clients[i].username);
+                    TraceLog(LOG_INFO, "Client %s set username to '%s'",
+                        clients[i].ip_addr, clients[i].username);
                 }
-                continue; // do not broadcast handshake
+                continue;
             }
 
-            TraceLog(LOG_INFO, "Received a message from %s: %s", clients[i].username, buffer);
-            char* colon_pos = strchr(buffer, ':');
-            if (colon_pos != NULL) {
-                char* msg_part = colon_pos + 1;
-                TraceLog(LOG_INFO, "Sending a message %s", buffer);
+            // Check if it's a file packet
+            if (strncmp(buffer, "FILE:", 5) == 0) {
+                // Extract filename for logging
+                char filename[256];
+                sscanf(buffer + 5, "%[^:]", filename);
+                // TraceLog(LOG_INFO, "Forwarding file packet: %s (%d bytes) from %s",
+                    // filename, bytes_recv, clients[i].username);
+
+                // Just broadcast it - don't try to parse or validate
                 server_broadcast_msg(buffer, fd);
 
-                if (g_on_msg_cb) {
-                    g_on_msg_cb(buffer, clients[i].username);
-                }
-            } else {
-                server_broadcast_msg(buffer, fd);
-                if (g_on_msg_cb) {
-                    g_on_msg_cb(buffer, clients[i].username);
-                }
+                // Don't call the callback for file packets (optional)
+                continue;
+            }
+
+            // Regular text message handling
+            server_broadcast_msg(buffer, fd);
+
+            if (g_on_msg_cb) {
+                g_on_msg_cb(buffer, clients[i].username);
             }
         } else if (bytes_recv == 0) {
+            // Client disconnected
             TraceLog(LOG_INFO, "Client disconnected (%s)", clients[i].ip_addr);
 
             char leave_msg[512];
-            snprintf(leave_msg, sizeof(leave_msg), "SYSTEM: User %s (%s) has left", clients[i].username, clients[i].ip_addr);
-            server_broadcast_msg(leave_msg, -1); // -1 means broadcast to all clients
+            snprintf(leave_msg, sizeof(leave_msg), "SYSTEM: User %s (%s) has left",
+                clients[i].username, clients[i].ip_addr);
+            server_broadcast_msg(leave_msg, -1);
 
             close(fd);
             for (int j = i + 1; j < client_count; ++j)
@@ -182,7 +192,6 @@ void server_recv_msgs()
         } else {
             if (errno == EWOULDBLOCK || errno == EAGAIN)
                 continue;
-            TraceLog(LOG_INFO, "recv failed from: %s (%s)", clients[i].ip_addr, strerror(errno));
             close(fd);
             for (int j = i + 1; j < client_count; j++)
                 clients[j - 1] = clients[j];
@@ -190,6 +199,41 @@ void server_recv_msgs()
             i--;
         }
     }
+}
+
+// Helper: Send all data, handling partial sends and flow control
+static ssize_t send_all_to_client(int socket_fd, const char* data, size_t len)
+{
+    size_t total_sent = 0;
+    int retry_count = 0;
+    const int MAX_RETRIES = 50;
+    
+    while (total_sent < len) {
+        ssize_t bytes_sent = send(socket_fd, data + total_sent, len - total_sent, 0);
+        
+        if (bytes_sent < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // Socket buffer full, wait and retry
+                retry_count++;
+                if (retry_count > MAX_RETRIES) {
+                    TraceLog(LOG_ERROR, "Max retries reached sending to client, sent %zu/%zu bytes", total_sent, len);
+                    return total_sent > 0 ? (ssize_t)total_sent : -1;
+                }
+                
+                // Exponential backoff: wait longer each retry
+                usleep(1000 * (1 << (retry_count / 10))); // 1ms, 2ms, 4ms, 8ms...
+                continue;
+            } else {
+                // Real error
+                return total_sent > 0 ? (ssize_t)total_sent : -1;
+            }
+        }
+        
+        total_sent += bytes_sent;
+        retry_count = 0; // Reset retry counter on successful send
+    }
+    
+    return (ssize_t)total_sent;
 }
 
 void server_broadcast_msg(const char* msg, int sender_fd)
@@ -200,14 +244,17 @@ void server_broadcast_msg(const char* msg, int sender_fd)
         if (fd == sender_fd)
             continue;
 
-        ssize_t bytes_sent = send(clients[i].sock_fd, msg, len, 0);
-        if (bytes_sent < 0 && errno != EWOULDBLOCK && errno != EAGAIN) {
-            TraceLog(LOG_WARNING, "send failed to %s: %s", clients[i].ip_addr, strerror(errno));
+        ssize_t bytes_sent = send_all_to_client(fd, msg, len);
+        if (bytes_sent < 0 || (size_t)bytes_sent < len) {
+            TraceLog(LOG_WARNING, "send failed to %s (%s), sent %zd/%zu bytes",
+                     clients[i].username, clients[i].ip_addr, bytes_sent, len);
             close(fd);
             for (int j = i + 1; j < client_count; ++j)
                 clients[j - 1] = clients[j];
             client_count--;
             i--;
+        } else {
+            // TraceLog(LOG_INFO, "Sent: %zu bytes to %s", len, clients[i].username);
         }
     }
 }

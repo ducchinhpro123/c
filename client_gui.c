@@ -1,12 +1,11 @@
-/*********************************************
-           Author: Autumn Leaves
-**********************************************/
-
 #include "client_network.h"
+#include "file_transfer.h"
 #include "message.h"
 #include "warning_dialog.h"
 #include "window.h"
+#include <stdint.h>
 #include <stdio.h>
+#include <unistd.h>
 
 #define RAYGUI_IMPLEMENTATION
 #pragma GCC diagnostic push
@@ -20,21 +19,20 @@
 
 #define FPS 60
 #define USERNAME_BUFFER 64
+#define MAX_CONCURRENT_TRANSFERS 10
 
 Message messages[MAX_MESSAGES];
-int message_count = 0;
+
 static bool edit_mode = false;
 static char text_buffer[MSG_BUFFER] = "";
+static MessageQueue g_mq = { 0 }; // Init message queue
+static FileTransfer* active_transfers[MAX_CONCURRENT_TRANSFERS] = { NULL };
+static int transfer_count = 0;
 
-// Init message queue
-static MessageQueue g_mq = { 0 };
-
-bool debugging = false;
-
-void debugging_button()
+void debugging_button(bool* debugging)
 {
     if (GuiButton((Rectangle) { WINDOW_WIDTH - 80, 40, 80, 20 }, "#152#Debugging")) {
-        debugging = !debugging;
+        *debugging = !*debugging;
     }
 }
 
@@ -168,12 +166,19 @@ void draw_wrapped_text(Font font, const char* text, Vector2 pos, float font_size
 
     while (word != NULL) {
         char* next_word = strtok(NULL, " ");
-        char word_buffer[256];
+        char word_buffer[8192];  // Increased from 256 to handle larger words
+
+        // Safety check: truncate if word is too long
+        size_t word_len = strlen(word);
+        if (word_len >= sizeof(word_buffer) - 2) {
+            TraceLog(LOG_WARNING, "Word too long (%zu bytes), truncating", word_len);
+            word_len = sizeof(word_buffer) - 2;
+        }
 
         if (next_word != NULL) {
-            snprintf(word_buffer, sizeof(word_buffer), "%s ", word);
+            snprintf(word_buffer, sizeof(word_buffer), "%.*s ", (int)word_len, word);
         } else {
-            strcpy(word_buffer, word);
+            snprintf(word_buffer, sizeof(word_buffer), "%.*s", (int)word_len, word);
         }
 
         Vector2 word_size = MeasureTextEx(font, word_buffer, font_size, spacing);
@@ -364,6 +369,10 @@ void debug_mq()
     }
 }
 
+void handle_file_drop()
+{
+}
+
 int main()
 {
     const char* window_title = "C&F";
@@ -382,6 +391,7 @@ int main()
 
     /* char *username = malloc(256); */
     bool is_connected = false;
+    bool debugging = false;
 
     // Init client connection
     ClientConnection conn;
@@ -390,11 +400,91 @@ int main()
     init_message_queue(&g_mq);
 
     while (!WindowShouldClose()) {
+        /*-------------------------- SENDING FILES --------------------------*/
         if (IsFileDropped()) {
             FilePathList dropped_files = LoadDroppedFiles();
             if (dropped_files.count > 0) {
                 const char* file_path = dropped_files.paths[0];
-                TraceLog(LOG_INFO, "%s", file_path);
+                TraceLog(LOG_INFO, "File dropped: %s", file_path);
+
+                // Get file size without loading entire file
+                FILE* file = fopen(file_path, "rb");
+                if (!file) {
+                    show_error("Failed to open file.");
+                    UnloadDroppedFiles(dropped_files);
+                    continue;
+                }
+
+                fseek(file, 0, SEEK_END);
+                size_t file_size = ftell(file);
+                fclose(file);
+
+                if (file_size > MAX_FILE_SIZE) {
+                    char err_msg[128];
+                    snprintf(err_msg, sizeof(err_msg), "File too large: %zu MB (max: %d MB)",
+                        file_size / (1024 * 1024), MAX_FILE_SIZE / (1024 * 1024));
+                    show_error(err_msg);
+                    TraceLog(LOG_ERROR, "%s", err_msg);
+                    UnloadDroppedFiles(dropped_files);
+                    continue;
+                }
+
+                // Extract filename from path
+                const char* filename = strrchr(file_path, '/');
+                filename = filename ? filename + 1 : file_path;
+                TraceLog(LOG_INFO, "Streaming file: %s (%zu bytes)", filename, file_size);
+
+                int total_chunks = (file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
+                unsigned char chunk_buffer[CHUNK_SIZE];
+
+                // Stream and send chunks one at a time
+                bool send_success = true;
+                for (int i = 0; i < total_chunks; i++) {
+                    size_t offset = i * CHUNK_SIZE;
+                    size_t chunk_size = CHUNK_SIZE;
+
+                    // Read chunk from disk
+                    if (!stream_file_chunk(file_path, offset, chunk_buffer, &chunk_size)) {
+                        TraceLog(LOG_ERROR, "Failed to read chunk %d from file", i);
+                        show_error("Failed to read file chunk.");
+                        send_success = false;
+                        break;
+                    }
+
+                    // Create and send packet
+                    char* packet = create_file_packet(filename, file_size,
+                        i, total_chunks,
+                        chunk_buffer, chunk_size);
+
+                    if (packet) {
+                        int bytes_sent = send_msg(&conn, packet);
+                        free(packet);
+
+                        if (bytes_sent <= 0) {
+                            TraceLog(LOG_ERROR, "Failed to send chunk %d", i);
+                            show_error("Failed to send file chunk.");
+                            send_success = false;
+                            break;
+                        }
+
+                        // No artificial delay - let send_all() handle flow control via EAGAIN
+                    } else {
+                        TraceLog(LOG_ERROR, "Failed to create packet for chunk %d", i);
+                        send_success = false;
+                        break;
+                    }
+                }
+
+                if (send_success) {
+                    // Add system message
+                    char msg[256];
+                    snprintf(msg, sizeof(msg), "Sent file: %s (%zu bytes)", filename, file_size);
+                    add_message(&g_mq, "SYSTEM", msg);
+                    TraceLog(LOG_INFO, "Successfully sent file: %s", filename);
+                } else {
+                    TraceLog(LOG_ERROR, "File send incomplete: %s", filename);
+                }
+
                 UnloadDroppedFiles(dropped_files);
             }
         }
@@ -411,25 +501,261 @@ int main()
             panel_scroll_msg(comic_font);
             text_input(&conn, username);
 
+            /*-------------------------- RECEIVE --------------------------*/
+            // Large buffer for accumulating FILE packets (256KB to handle multiple large packets)
+            // Each file packet can be ~50KB (32KB data + base64 overhead + headers)
+            #define FILE_RECV_BUFFER_SIZE (262144)  // 256KB
+            static char recv_buffer[FILE_RECV_BUFFER_SIZE] = { 0 };
+            static size_t buffer_len = 0;
+
             ssize_t bytes_recv = recv_msg(&conn, message_recv, MSG_BUFFER);
             if (bytes_recv > 0) {
-                TraceLog(LOG_INFO, "Message received: %s", message_recv);
-                char* colon_pos = strchr(message_recv, ':');
-                if (colon_pos != NULL) {
-                    char sender[256];
-                    size_t sender_len = colon_pos - message_recv;
-                    if (sender_len >= sizeof(sender))
-                        sender_len = sizeof(sender) - 1;
-                    strncpy(sender, message_recv, sender_len);
-                    sender[sender_len] = '\0';
+                // Null-terminate for string operations
+                message_recv[bytes_recv] = '\0';
 
-                    char* msg_text = colon_pos + 1;
-                    while (*msg_text == ' ')
-                        msg_text++; // skip spaces
-                    add_message(&g_mq, sender, msg_text);
+                // Check if it's a FILE packet OR we're accumulating file data (buffer_len > 0)
+                // This ensures continuation data from multi-packet files is not lost
+                if (strncmp(message_recv, "FILE:", 5) == 0 || buffer_len > 0) {
+                    // Handle FILE packet with accumulation buffer
+                    // Check if we have enough space (leave 10% margin for safety)
+                    if (buffer_len + bytes_recv < FILE_RECV_BUFFER_SIZE * 0.9) {
+                        memcpy(recv_buffer + buffer_len, message_recv, bytes_recv);
+                        buffer_len += bytes_recv;
+                    } else {
+                        // Buffer getting full - try to process what we have first
+                        TraceLog(LOG_WARNING, "Receive buffer at %zu/%d bytes, processing before adding more",
+                                 buffer_len, FILE_RECV_BUFFER_SIZE);
+                        
+                        // If buffer is dangerously full and we can't process, reset
+                        if (buffer_len + bytes_recv >= FILE_RECV_BUFFER_SIZE) {
+                            TraceLog(LOG_ERROR, "Receive buffer overflow! Dropping %zu bytes. This may cause transfer failure.",
+                                     buffer_len);
+                            buffer_len = 0;
+                            // Try to add new data to empty buffer
+                            if (bytes_recv < FILE_RECV_BUFFER_SIZE) {
+                                memcpy(recv_buffer, message_recv, bytes_recv);
+                                buffer_len = bytes_recv;
+                            }
+                        } else {
+                            // Still have room, add the data
+                            memcpy(recv_buffer + buffer_len, message_recv, bytes_recv);
+                            buffer_len += bytes_recv;
+                        }
+                    }
+
+                    // Process all complete FILE packets in the buffer
+                    char* packet_start = recv_buffer;
+                    char* buffer_end = recv_buffer + buffer_len;
+                    int packets_processed = 0;
+
+                    while (packet_start < buffer_end) {
+                        // Find next FILE packet
+                        char* file_marker = strstr(packet_start, "FILE:");
+                        if (!file_marker)
+                            break;
+
+                        // Check if file_marker is within bounds
+                        if (file_marker >= buffer_end) {
+                            TraceLog(LOG_WARNING, "FILE marker beyond buffer bounds, waiting for more data");
+                            break;
+                        }
+
+                        // Check for complete packet (must have newline delimiter)
+                        char* packet_end = strchr(file_marker, '\n');
+                        if (!packet_end || packet_end >= buffer_end) {
+                            TraceLog(LOG_INFO, "Incomplete packet at buffer end, waiting for more data");
+                            break; // Incomplete packet, will be completed in next recv
+                        }
+
+                        packets_processed++;
+                        TraceLog(LOG_INFO, "Processing packet %d from received buffer", packets_processed);
+
+                        // Process this complete packet
+                        if (!strncmp(file_marker, "FILE:", 5)) {
+                            TraceLog(LOG_INFO, "Received a file");
+                            FileTransfer* ft = NULL;
+
+                            char temp_filename[MAX_FILENAME];
+                            sscanf(file_marker + 5, "%[^:]", temp_filename);
+                            for (int i = 0; i < transfer_count; i++) {
+                                if (active_transfers[i] && !strcmp(active_transfers[i]->filename, temp_filename)) {
+                                    ft = active_transfers[i];
+                                    break;
+                                }
+                            }
+
+                            if (!ft && transfer_count < 10) {
+                                ft = malloc(sizeof(FileTransfer));
+                                memset(ft, 0, sizeof(FileTransfer));
+                                active_transfers[transfer_count++] = ft;
+                            }
+
+                            // Parse and add chunk
+                            unsigned char* chunk_data;
+                            size_t chunk_size;
+
+                            TraceLog(LOG_INFO, "Parsing a file packet.");
+                            if (parse_file_packet(file_marker, ft, &chunk_data, &chunk_size)) {
+                                TraceLog(LOG_INFO, "parse_file_packet returned successfully, chunk_size=%zu", chunk_size);
+
+                                // Extract chunk index from packet
+                                const char* parse_start = file_marker + 5; // Skip "FILE:"
+                                const char* pos = parse_start;
+
+                                // Skip filename (first field)
+                                pos = strchr(pos, ':');
+                                if (!pos) {
+                                    TraceLog(LOG_ERROR, "Invalid packet format - no first colon");
+                                    free(chunk_data);
+                                    continue;
+                                }
+                                pos++; // Move past the colon
+
+                                // Skip filesize (second field)
+                                pos = strchr(pos, ':');
+                                if (!pos) {
+                                    TraceLog(LOG_ERROR, "Invalid packet format - no second colon");
+                                    free(chunk_data);
+                                    continue;
+                                }
+                                pos++; // Move past the colon
+
+                                // Now pos points to the chunk_index string
+                                const char* chunk_index_str = pos;
+                                pos = strchr(pos, ':');
+                                if (!pos) {
+                                    TraceLog(LOG_ERROR, "Invalid packet format - no third colon");
+                                    free(chunk_data);
+                                    continue;
+                                }
+
+                                char temp[16];
+                                int len = pos - chunk_index_str;
+                                if (len >= (int)sizeof(temp))
+                                    len = (int)sizeof(temp) - 1;
+                                strncpy(temp, chunk_index_str, len);
+                                temp[len] = '\0';
+
+                                int chunk_index = atoi(temp);
+                                TraceLog(LOG_INFO, "Extracted chunk_index=%d", chunk_index);
+
+                                // Validate file handle
+                                if (ft->file_handle == NULL) {
+                                    TraceLog(LOG_ERROR, "File handle not opened!");
+                                    free(chunk_data);
+                                    continue;
+                                }
+
+                                // Write chunk directly to disk
+                                if (!add_chunk_to_streaming_transfer(ft, chunk_index, chunk_data, chunk_size)) {
+                                    TraceLog(LOG_ERROR, "Failed to write chunk %d to disk", chunk_index);
+                                    free(chunk_data);
+
+                                    // Cleanup failed transfer
+                                    for (int i = 0; i < transfer_count; i++) {
+                                        if (active_transfers[i] == ft) {
+                                            close_streaming_transfer(ft, false);
+                                            for (int j = i; j < transfer_count - 1; j++) {
+                                                active_transfers[j] = active_transfers[j + 1];
+                                            }
+                                            active_transfers[transfer_count - 1] = NULL;
+                                            transfer_count--;
+                                            break;
+                                        }
+                                    }
+                                    continue;
+                                }
+
+                                free(chunk_data);
+
+                                // Check if complete
+                                if (ft->complete) {
+                                    char msg[512];
+                                    snprintf(msg, sizeof(msg), "Received file: %s (%zu bytes)",
+                                        ft->filename, ft->total_size);
+                                    add_message(&g_mq, "SYSTEM", msg);
+
+                                    // Close and finalize the transfer
+                                    for (int i = 0; i < transfer_count; i++) {
+                                        if (active_transfers[i] == ft) {
+                                            close_streaming_transfer(ft, true);
+
+                                            // Shift remaining transfers left
+                                            for (int j = i; j < transfer_count - 1; j++) {
+                                                active_transfers[j] = active_transfers[j + 1];
+                                            }
+                                            active_transfers[transfer_count - 1] = NULL;
+                                            transfer_count--;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Move to next packet (after newline) - we already validated packet_end exists
+                        packet_start = packet_end + 1;
+                    }
+
+                    TraceLog(LOG_INFO, "Processed %d FILE packets from received buffer", packets_processed);
+
+                    // Move any remaining incomplete data to start of buffer
+                    size_t remaining = buffer_end - packet_start;
+                    if (remaining > 0 && packet_start != recv_buffer) {
+                        memmove(recv_buffer, packet_start, remaining);
+                        buffer_len = remaining;
+                        TraceLog(LOG_INFO, "Kept %zu bytes of incomplete packet for next iteration", remaining);
+                    } else if (remaining == 0) {
+                        buffer_len = 0;
+                    } else {
+                        // packet_start == recv_buffer, no packets were processed
+                        buffer_len = remaining;
+                    }
                 } else {
-                    add_message(&g_mq, "unknown", message_recv);
+                    // Regular text message - parse "sender: text" format
+                    // BUT: Skip if it looks like leftover FILE packet data (contains base64/binary)
+                    bool is_likely_binary = false;
+                    size_t msg_len = strlen(message_recv);
+                    
+                    // Heuristic: if message is very long (>1KB) or has no spaces, it's probably binary data
+                    if (msg_len > 1024) {
+                        is_likely_binary = true;
+                        TraceLog(LOG_WARNING, "Skipping display of likely binary/base64 data (%zu bytes)", msg_len);
+                    }
+                    
+                    if (!is_likely_binary) {
+                        char* colon_pos = strchr(message_recv, ':');
+                        if (colon_pos && colon_pos > message_recv) {
+                            // Extract sender
+                            size_t sender_len = colon_pos - message_recv;
+                            char sender[256];
+                            if (sender_len < sizeof(sender)) {
+                                strncpy(sender, message_recv, sender_len);
+                                sender[sender_len] = '\0';
+
+                                // Extract message text (skip ": " after sender)
+                                char* text_start = colon_pos + 1;
+                                while (*text_start == ' ' || *text_start == '\t') {
+                                    text_start++;
+                                }
+
+                                // Add to message queue
+                                add_message(&g_mq, sender, text_start);
+                                TraceLog(LOG_INFO, "Received message from %s: %s", sender, text_start);
+                            } else {
+                                TraceLog(LOG_WARNING, "Sender name too long, ignoring message");
+                            }
+                        } else {
+                            // No colon found, might be a system message (but check length first)
+                            if (msg_len < 512) {  // Only show short system messages
+                                add_message(&g_mq, "SYSTEM", message_recv);
+                            } else {
+                                TraceLog(LOG_WARNING, "Skipping long non-text data (%zu bytes)", msg_len);
+                            }
+                        }
+                    }
                 }
+
             } else if (bytes_recv < 0) {
                 is_connected = false;
                 show_error("Connection lost");
@@ -446,7 +772,7 @@ int main()
 
         setting_button();
 
-        debugging_button();
+        debugging_button(&debugging);
         if (debugging) {
             show_fps();
         }
