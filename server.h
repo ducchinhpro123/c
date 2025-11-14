@@ -16,6 +16,7 @@
 #define PORT 8898
 // #define BUFFER_SIZE 1024
 #define BUFFER_SIZE 65536 // for Base64 encoded
+#define CLIENT_STREAM_BUFFER (BUFFER_SIZE * 2)
 
 typedef void (*server_msg_cb)(const char* msg, const char* username);
 
@@ -23,6 +24,8 @@ typedef struct {
     int sock_fd;
     char username[256];
     char ip_addr[16];
+    char recv_buffer[CLIENT_STREAM_BUFFER];
+    size_t recv_len;
 } Client;
 
 typedef struct {

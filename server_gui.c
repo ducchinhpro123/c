@@ -116,8 +116,6 @@ void panel_scroll_msg(Font custom_font)
 
     int font_size = 16;
     int gap = 10;
-    int pad_x = 8;
-    int pad_y = 8;
 
     int x_pos = (WINDOW_WIDTH - panel_width) / 2;
     int y_pos = (WINDOW_HEIGHT - panel_height) / 2;
@@ -125,8 +123,6 @@ void panel_scroll_msg(Font custom_font)
     Rectangle panel_rec = { x_pos, y_pos, panel_width, panel_height }; // The position of pannel
     Rectangle panel_content_rec = { 0, 0, panel_width - 15, 1200 };
     Rectangle panel_view = { 0 };
-
-    int content_width = panel_width - 15 - 2 * pad_x;
 
     static Vector2 panel_scroll = { 0, 0 };
     GuiScrollPanel(panel_rec, "CHAT", panel_content_rec, &panel_scroll, &panel_view);

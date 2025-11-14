@@ -2,6 +2,7 @@
 #define CLIENT_NETWORK_H
 
 #include <stdbool.h>
+#include <sys/types.h>
 
 typedef struct {
     int socket_fd;

@@ -1,4 +1,5 @@
 #include "client_network.h"
+#include "message.h"
 #include <arpa/inet.h>
 #include <asm-generic/errno-base.h>
 #include <asm-generic/errno.h>
@@ -9,9 +10,13 @@
 #include <netinet/tcp.h>
 #include <raylib.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+// Helper function: Send all data, handling partial sends and EAGAIN
+static ssize_t send_all(int socket_fd, const char* data, size_t len);
 
 /* typedef struct { */
 /*     int socket_fd; */
@@ -100,8 +105,7 @@ int connect_to_server(ClientConnection* conn, const char* host, const char* port
     if (conn->username[0] != '\0') {
         char handshake[300];
         snprintf(handshake, sizeof(handshake), "USERNAME:%s", conn->username);
-        ssize_t sent = send(conn->socket_fd, handshake, strlen(handshake), 0);
-        if (sent < 0) {
+        if (send_msg(conn, handshake) < 0) {
             TraceLog(LOG_WARNING, "Failed to send username handshake: %s", strerror(errno));
         } else {
             TraceLog(LOG_INFO, "Sent username handshake for '%s'", conn->username);
@@ -119,34 +123,68 @@ static ssize_t send_all(int socket_fd, const char* data, size_t len)
 {
     size_t total_sent = 0;
     int retry_count = 0;
-    const int MAX_RETRIES = 50;
-    
+    const int MAX_RETRIES = (len > 10000) ? 2000 : 200;
+
+    int base_wait_ms = 2;
+    if (len > 1000000) {
+        base_wait_ms = 50;
+    } else if (len > 100000) {
+        base_wait_ms = 20;
+    } else if (len > 10000) {
+        base_wait_ms = 10;
+    }
+
     while (total_sent < len) {
-        ssize_t bytes_sent = send(socket_fd, data + total_sent, len - total_sent, 0);
-        
+        ssize_t bytes_sent = send(socket_fd, data + total_sent, len - total_sent, MSG_NOSIGNAL);
+
         if (bytes_sent < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // Socket buffer full, wait and retry
                 retry_count++;
                 if (retry_count > MAX_RETRIES) {
-                    TraceLog(LOG_ERROR, "Max retries reached, sent %zu/%zu bytes", total_sent, len);
-                    return total_sent > 0 ? (ssize_t)total_sent : -1;
+                    TraceLog(LOG_ERROR, "Max retries reached while sending %zu/%zu bytes", total_sent, len);
+                    return -1;
                 }
-                
-                // Exponential backoff: wait longer each retry
-                usleep(1000 * (1 << (retry_count / 10))); // 1ms, 2ms, 4ms, 8ms...
+
+                int wait_ms = base_wait_ms;
+                if (retry_count > 100)
+                    wait_ms *= 2;
+                if (retry_count > 500)
+                    wait_ms *= 5;
+                if (retry_count > 1000)
+                    wait_ms *= 10;
+                if (wait_ms > 1000)
+                    wait_ms = 1000;
+
+                usleep((useconds_t)wait_ms * 1000);
                 continue;
-            } else {
-                // Real error
-                TraceLog(LOG_ERROR, "Send error after %zu bytes: %s", total_sent, strerror(errno));
+            }
+
+            if (errno == EPIPE || errno == ECONNRESET) {
+                TraceLog(LOG_WARNING, "Connection closed while sending after %zu/%zu bytes", total_sent, len);
+                return -1;
+            }
+
+            TraceLog(LOG_ERROR, "Send error after %zu/%zu bytes: %s", total_sent, len, strerror(errno));
+            return -1;
+        } else if (bytes_sent == 0) {
+            retry_count++;
+            if (retry_count > MAX_RETRIES) {
+                TraceLog(LOG_WARNING, "Send stalled after %d retries (%zu/%zu bytes)", retry_count, total_sent, len);
                 return total_sent > 0 ? (ssize_t)total_sent : -1;
             }
+            usleep(1000);
+            continue;
         }
-        
-        total_sent += bytes_sent;
-        retry_count = 0; // Reset retry counter on successful send
+
+        total_sent += (size_t)bytes_sent;
+
+        if (len > 65536 && (total_sent % 65536) == 0) {
+            TraceLog(LOG_DEBUG, "send_all progress: %zu/%zu bytes", total_sent, len);
+        }
+
+        retry_count = 0;
     }
-    
+
     return (ssize_t)total_sent;
 }
 
@@ -158,7 +196,32 @@ int send_msg(ClientConnection* conn, const char* msg)
     }
 
     size_t len = strlen(msg);
-    ssize_t bytes_sent = send_all(conn->socket_fd, msg, len);
+    bool append_newline = (len == 0) || (msg[len - 1] != '\n');
+    size_t total_len = len + (append_newline ? 1 : 0);
+    const size_t STACK_CAP = MSG_BUFFER + 2;
+    char* frame = NULL;
+    char stack_buffer[STACK_CAP];
+
+    if (total_len + 1 <= STACK_CAP) {
+        frame = stack_buffer;
+    } else {
+        frame = malloc(total_len + 1);
+        if (!frame) {
+            TraceLog(LOG_ERROR, "Out of memory while sending message");
+            return -1;
+        }
+    }
+
+    memcpy(frame, msg, len);
+    if (append_newline) {
+        frame[len] = '\n';
+    }
+    frame[total_len] = '\0';
+
+    ssize_t bytes_sent = send_all(conn->socket_fd, frame, total_len);
+    if (frame != stack_buffer) {
+        free(frame);
+    }
 
     if (bytes_sent < 0) {
         TraceLog(LOG_ERROR, "Failed to send message");
@@ -167,9 +230,7 @@ int send_msg(ClientConnection* conn, const char* msg)
     } else if ((size_t)bytes_sent < len) {
         TraceLog(LOG_WARNING, "Only sent %zd of %zu bytes", bytes_sent, len);
         return (int)bytes_sent;
-    } else {
-        TraceLog(LOG_INFO, "Sent: %zd bytes", bytes_sent);
-    }
+    } 
 
     return (int)bytes_sent;
 }
