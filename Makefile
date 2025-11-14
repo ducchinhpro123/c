@@ -3,15 +3,15 @@ CFLAGS = -Wall -Wextra -I/usr/include
 LIBS = -lm -lraylib -lpthread -ldl -lrt -lX11
 
 SERVER_TARGET = server_gui
-SERVER_SOURCE = server_gui.c server.c message.c file_transfer.c file_transfer_protocol.c sliding_window.c
+SERVER_SOURCE = server_gui.c server.c message.c file_transfer.c
 
 # Headless server CLI
 SERVER_CLI_TARGET = server
-SERVER_CLI_SOURCE = server_cli.c server.c message.c file_transfer.c file_transfer_protocol.c sliding_window.c
+SERVER_CLI_SOURCE = server_cli.c server.c message.c file_transfer.c
 
 
 CLIENT_TARGET = client_gui
-CLIENT_SOURCE = client_gui.c warning_dialog.c client_network.c message.c file_transfer.c file_transfer_protocol.c sliding_window.c
+CLIENT_SOURCE = client_gui.c warning_dialog.c client_network.c message.c file_transfer.c
 
 all: $(SERVER_TARGET) $(CLIENT_TARGET)
 
