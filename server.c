@@ -1,6 +1,7 @@
 #include "server.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/tcp.h>
 #include <raylib.h>
 #include <stdio.h>
 #include <string.h>
@@ -44,6 +45,14 @@ int server_accept_client()
         return -1;
     }
 
+    // Optimize socket for LAN speed
+    int nodelay = 1;
+    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+    int sendbuf = 2 * 1024 * 1024;
+    setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &sendbuf, sizeof(sendbuf));
+    int recvbuf = 2 * 1024 * 1024;
+    setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &recvbuf, sizeof(recvbuf));
+    
     // Non-block mode
     int flags = fcntl(client_fd, F_GETFL, 0);
     if (flags == -1) {

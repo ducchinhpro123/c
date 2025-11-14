@@ -11,7 +11,7 @@
 #include <raylib.h>
 
 #define MAX_FILENAME 256
-#define CHUNK_SIZE 32768 // 32KB chunks for better throughput
+#define CHUNK_SIZE 262144 // 256KB chunks for LAN speed (was 32KB)
 #define MAX_FILE_SIZE (500 * 1024 * 1024) // 500MB limit
 
 // New Protocol Constants
@@ -99,6 +99,10 @@ uint32_t htonl_custom(uint32_t hostlong);
 uint32_t ntohl_custom(uint32_t netlong);
 uint16_t htons_custom(uint16_t hostshort);
 uint16_t ntohs_custom(uint16_t netshort);
+
+// ACK/NACK Control Packets
+unsigned char* create_ack_packet(uint32_t chunk_index, size_t* packet_size);
+bool parse_ack_packet(const unsigned char* packet_data, size_t packet_len, uint32_t* chunk_index);
 
 // LEGACY PROTOCOL FUNCTIONS (Delimiter-Based - DEPRECATED)
 // =========================================================

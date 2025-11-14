@@ -3,7 +3,6 @@
 #include "message.h"
 #include "warning_dialog.h"
 #include "window.h"
-#include <stdint.h>
 #include <stdio.h>
 #include <unistd.h>
 
@@ -166,7 +165,7 @@ void draw_wrapped_text(Font font, const char* text, Vector2 pos, float font_size
 
     while (word != NULL) {
         char* next_word = strtok(NULL, " ");
-        char word_buffer[8192];  // Increased from 256 to handle larger words
+        char word_buffer[8192]; // Increased from 256 to handle larger words
 
         // Safety check: truncate if word is too long
         size_t word_len = strlen(word);
@@ -501,10 +500,10 @@ int main()
             panel_scroll_msg(comic_font);
             text_input(&conn, username);
 
-            /*-------------------------- RECEIVE --------------------------*/
-            // Large buffer for accumulating FILE packets (256KB to handle multiple large packets)
-            // Each file packet can be ~50KB (32KB data + base64 overhead + headers)
-            #define FILE_RECV_BUFFER_SIZE (262144)  // 256KB
+/*-------------------------- RECEIVE --------------------------*/
+// Large buffer for accumulating FILE packets (256KB to handle multiple large packets)
+// Each file packet can be ~50KB (32KB data + base64 overhead + headers)
+#define FILE_RECV_BUFFER_SIZE (262144) // 256KB
             static char recv_buffer[FILE_RECV_BUFFER_SIZE] = { 0 };
             static size_t buffer_len = 0;
 
@@ -524,12 +523,12 @@ int main()
                     } else {
                         // Buffer getting full - try to process what we have first
                         TraceLog(LOG_WARNING, "Receive buffer at %zu/%d bytes, processing before adding more",
-                                 buffer_len, FILE_RECV_BUFFER_SIZE);
-                        
+                            buffer_len, FILE_RECV_BUFFER_SIZE);
+
                         // If buffer is dangerously full and we can't process, reset
                         if (buffer_len + bytes_recv >= FILE_RECV_BUFFER_SIZE) {
                             TraceLog(LOG_ERROR, "Receive buffer overflow! Dropping %zu bytes. This may cause transfer failure.",
-                                     buffer_len);
+                                buffer_len);
                             buffer_len = 0;
                             // Try to add new data to empty buffer
                             if (bytes_recv < FILE_RECV_BUFFER_SIZE) {
@@ -707,13 +706,13 @@ int main()
                     // BUT: Skip if it looks like leftover FILE packet data (contains base64/binary)
                     bool is_likely_binary = false;
                     size_t msg_len = strlen(message_recv);
-                    
+
                     // Heuristic: if message is very long (>1KB) or has no spaces, it's probably binary data
                     if (msg_len > 1024) {
                         is_likely_binary = true;
                         TraceLog(LOG_WARNING, "Skipping display of likely binary/base64 data (%zu bytes)", msg_len);
                     }
-                    
+
                     if (!is_likely_binary) {
                         char* colon_pos = strchr(message_recv, ':');
                         if (colon_pos && colon_pos > message_recv) {
@@ -738,7 +737,7 @@ int main()
                             }
                         } else {
                             // No colon found, might be a system message (but check length first)
-                            if (msg_len < 512) {  // Only show short system messages
+                            if (msg_len < 512) { // Only show short system messages
                                 add_message(&g_mq, "SYSTEM", message_recv);
                             } else {
                                 TraceLog(LOG_WARNING, "Skipping long non-text data (%zu bytes)", msg_len);

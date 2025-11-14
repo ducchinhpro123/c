@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <raylib.h>
 #include <stdio.h>
 #include <string.h>
@@ -23,6 +24,29 @@ void init_client_connection(ClientConnection* conn)
     conn->socket_fd = -1;
     conn->connected = false;
     memset(conn->username, 0, sizeof(conn->username));
+}
+
+// Helper: Set socket options for high-speed LAN transfer
+static void optimize_socket_for_lan(int socket_fd) {
+    // Disable Nagle's algorithm for immediate sending
+    int flag = 1;
+    if (setsockopt(socket_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
+        TraceLog(LOG_WARNING, "Failed to set TCP_NODELAY");
+    }
+    
+    // Increase send buffer to 2MB for bulk transfers
+    int sendbuf = 2 * 1024 * 1024;
+    if (setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, &sendbuf, sizeof(sendbuf)) < 0) {
+        TraceLog(LOG_WARNING, "Failed to set SO_SNDBUF");
+    }
+    
+    // Increase receive buffer to 2MB
+    int recvbuf = 2 * 1024 * 1024;
+    if (setsockopt(socket_fd, SOL_SOCKET, SO_RCVBUF, &recvbuf, sizeof(recvbuf)) < 0) {
+        TraceLog(LOG_WARNING, "Failed to set SO_RCVBUF");
+    }
+    
+    TraceLog(LOG_INFO, "Socket optimized for LAN: TCP_NODELAY, 2MB buffers");
 }
 
 int connect_to_server(ClientConnection* conn, const char* host, const char* port, const char* username)
@@ -64,6 +88,9 @@ int connect_to_server(ClientConnection* conn, const char* host, const char* port
     conn->connected = true;
     // set username
     snprintf(conn->username, sizeof(conn->username), "%s", username);
+
+    // Optimize socket for LAN speed
+    optimize_socket_for_lan(conn->socket_fd);
 
     // set non-blocking mode
     int flags = fcntl(conn->socket_fd, F_GETFL, 0);
