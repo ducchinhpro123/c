@@ -3,7 +3,6 @@
 #include "message.h"
 #include "warning_dialog.h"
 #include "window.h"
-#include <errno.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -546,14 +545,14 @@ static void handle_file_packet(char* message)
         const char* filename = strtok_r(NULL, "|", &save_ptr);
         const char* total_bytes_str = strtok_r(NULL, "|", &save_ptr);
         const char* chunk_size_str = strtok_r(NULL, "|", &save_ptr);
-        
+
         TraceLog(LOG_INFO, "FILE_META received: sender=%s, file_id=%s, filename=%s, total=%s, chunk=%s",
-                 sender ? sender : "NULL",
-                 file_id ? file_id : "NULL",
-                 filename ? filename : "NULL",
-                 total_bytes_str ? total_bytes_str : "NULL",
-                 chunk_size_str ? chunk_size_str : "NULL");
-        
+            sender ? sender : "NULL",
+            file_id ? file_id : "NULL",
+            filename ? filename : "NULL",
+            total_bytes_str ? total_bytes_str : "NULL",
+            chunk_size_str ? chunk_size_str : "NULL");
+
         if (!sender || !file_id || !filename || !total_bytes_str || !chunk_size_str) {
             TraceLog(LOG_ERROR, "FILE_META validation failed - missing fields");
             return;
@@ -616,7 +615,7 @@ static void handle_file_packet(char* message)
         const char* payload = strtok_r(NULL, "|", &save_ptr);
         if (!sender || !file_id || !chunk_idx_str || !payload)
             return;
-        
+
         (void)sender;
         if (!file_id || !chunk_idx_str || !payload)
             return;
@@ -647,7 +646,7 @@ static void handle_file_packet(char* message)
         const char* file_id = strtok_r(NULL, "|", &save_ptr);
         if (!sender || !file_id)
             return;
-        
+
         (void)sender;
         if (!file_id)
             return;
@@ -665,7 +664,7 @@ static void handle_file_packet(char* message)
         const char* sender = strtok_r(NULL, "|", &save_ptr);
         const char* file_id = strtok_r(NULL, "|", &save_ptr);
         const char* reason = strtok_r(NULL, "|", &save_ptr);
-        
+
         (void)sender;
         IncomingTransfer* slot = get_incoming_transfer(file_id);
         if (slot)
@@ -724,6 +723,7 @@ static void process_incoming_stream(const char* data, size_t len)
     }
 }
 
+// Setup and getting information of a file
 static void start_outgoing_transfer(ClientConnection* conn, const char* file_path)
 {
     if (!conn || !file_path)
@@ -757,6 +757,7 @@ static void start_outgoing_transfer(ClientConnection* conn, const char* file_pat
         return;
     }
 
+    // Setup outgoing transfer
     memset(slot, 0, sizeof(*slot));
     slot->active = true;
     slot->fp = fp;
@@ -764,6 +765,7 @@ static void start_outgoing_transfer(ClientConnection* conn, const char* file_pat
     slot->chunk_size = FILE_CHUNK_SIZE;
     slot->sent_bytes = 0;
     slot->next_chunk_index = 0;
+    // How many chunks are needed to complete the transfer process?
     slot->chunks_total = (slot->total_bytes + slot->chunk_size - 1) / slot->chunk_size;
     if (conn->username[0] == '\0') {
         strncpy(slot->sender, "Unknown", sizeof(slot->sender) - 1);
@@ -789,12 +791,15 @@ static void process_file_drop(ClientConnection* conn)
         return;
 
     FilePathList dropped_files = LoadDroppedFiles();
+    TraceLog(LOG_INFO, "File path entries count: %d", dropped_files.count);
+
     for (unsigned int i = 0; i < dropped_files.count; ++i) {
         start_outgoing_transfer(conn, dropped_files.paths[i]);
     }
     UnloadDroppedFiles(dropped_files);
 }
 
+// Send chunks every frame
 static void pump_outgoing_transfers(ClientConnection* conn)
 {
     unsigned char chunk_buffer[FILE_CHUNK_SIZE];
@@ -815,9 +820,9 @@ static void pump_outgoing_transfers(ClientConnection* conn)
                 close_outgoing_transfer(conn, transfer, "metadata too large");
                 continue;
             }
-            
+
             TraceLog(LOG_INFO, "Sending FILE_META: %s", message_buffer);
-            
+
             if (send_msg(conn, message_buffer) < 0) {
                 close_outgoing_transfer(conn, transfer, "failed to send metadata");
                 continue;
@@ -970,6 +975,7 @@ int main()
     init_message_queue(&g_mq);
 
     while (!WindowShouldClose()) {
+        // For file tranfer handling
         if (is_connected) {
             process_file_drop(&conn);
             pump_outgoing_transfers(&conn);

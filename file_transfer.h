@@ -4,8 +4,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#define FILE_TRANSFER_MAX_SIZE (500LL * 1024 * 1024)
-#define FILE_CHUNK_SIZE 48000
+#define FILE_TRANSFER_MAX_SIZE (500LL * 1024 * 1024) // 500 MB
+#define FILE_CHUNK_SIZE 48000 // 48000 bytes is approximately 46.875 KB
 #define FILE_ID_LEN 32
 #define FILE_NAME_MAX_LEN 256
 #define FILE_PATH_MAX_LEN 512
