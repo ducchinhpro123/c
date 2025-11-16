@@ -4,7 +4,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 
-#define MSG_BUFFER 65536  // Must match BUFFER_SIZE in server.h for file packets
+#define MSG_BUFFER 1500000  // Must match BUFFER_SIZE in server.h for file packets
 #define MAX_MESSAGES 200
 
 typedef struct {
