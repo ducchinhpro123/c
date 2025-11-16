@@ -1,3 +1,4 @@
+#include "platform.h"
 #include "server.h"
 #include "server.h"
 #include "file_transfer.h"
@@ -90,7 +91,7 @@ int server_accept_client()
 
     if (client_count >= MAX_CLIENTS) {
         TraceLog(LOG_WARNING, "Max clients reached, rejecting");
-        close(client_fd);
+        closesocket(client_fd);
         return -1;
     }
 
@@ -120,16 +121,20 @@ void cleanup_server()
 {
     if (server_fd != -1) {
         TraceLog(LOG_INFO, "Cleaning the server");
-        close(server_fd);
+        closesocket(server_fd);
         server_fd = -1;
     }
 
     TraceLog(LOG_INFO, "Finished clean up the server");
     server_running = false;
+
+    cleanup_network();
 }
 
 bool init_server()
 {
+
+    init_network();
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
     if (server_fd == -1) {
@@ -148,13 +153,14 @@ bool init_server()
     if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
         perror("bind");
         TraceLog(LOG_ERROR, "Bind failed: %s", strerror(errno));
-        close(server_fd);
+        // close(server_fd);
+        closesocket(server_fd);
         return false;
     }
     if (listen(server_fd, 10) == -1) {
         perror("listen");
         TraceLog(LOG_ERROR, "Listen failed: %s", strerror(errno));
-        close(server_fd);
+        closesocket(server_fd);
         return false;
     }
 
@@ -268,7 +274,7 @@ static void remove_client(int index)
     int fd = clients[index].sock_fd;
     cleanup_sessions_for_fd(fd);
 
-    close(fd);
+    closesocket(fd);
     clients[index].sock_fd = -1;
     clients[index].recv_len = 0;
 
@@ -616,7 +622,7 @@ void server_broadcast_msg(const char* msg, int sender_fd)
     // Remove failed clients after iteration to avoid corruption
     for (int i = failed_count - 1; i >= 0; i--) {
         int idx = failed_clients[i];
-        close(clients[idx].sock_fd);
+        closesocket(clients[idx].sock_fd);
         
         // Shift remaining clients
         for (int j = idx + 1; j < client_count; j++) {

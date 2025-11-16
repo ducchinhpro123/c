@@ -1,8 +1,17 @@
 #ifndef MESSAGE_H
 #define MESSAGE_H
 
-#include <pthread.h>
 #include <stdbool.h>
+
+#ifdef _WIN32
+    #include <windows.h>
+    // Define a type that's large enough to hold a CRITICAL_SECTION
+    typedef struct {
+        char data[64];  // Size should accommodate CRITICAL_SECTION (platform-dependent)
+    } pthread_mutex_t;
+#else
+    #include <pthread.h>
+#endif
 
 #define MSG_BUFFER 1500000  // Must match BUFFER_SIZE in server.h for file packets
 #define MAX_MESSAGES 200

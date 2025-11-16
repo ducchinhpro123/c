@@ -1,10 +1,16 @@
 #include "file_transfer.h"
+#include "platform.h"
 
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
+#ifdef _WIN32
+    #include <io.h>
+    #include <stdint.h>
+#else
+    #include <unistd.h>
+#endif
 
 static const char base64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -122,7 +128,11 @@ void generate_file_id(char* out, size_t len)
 {
     static bool seeded = false;
     if (!seeded) {
+#ifdef _WIN32
+        srand((unsigned int)time(NULL) ^ (unsigned int)(uintptr_t)&seeded);
+#else
         srand((unsigned int)time(NULL) ^ (unsigned int)getpid());
+#endif
         seeded = true;
     }
 

@@ -1,6 +1,7 @@
 #ifndef CLIENT_NETWORK_H
 #define CLIENT_NETWORK_H
 
+// #include "platform.h"
 #include <stdbool.h>
 #include <sys/types.h>
 

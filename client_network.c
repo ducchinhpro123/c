@@ -1,19 +1,20 @@
+#include "platform.h"
 #include "client_network.h"
 #include "message.h"
-#include <arpa/inet.h>
-#include <asm-generic/errno-base.h>
-#include <asm-generic/errno.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
+// #include <fcntl.h>
+// #include <netdb.h>
+// #include <netinet/in.h>
+// #include <netinet/tcp.h>
 #include <raylib.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#ifdef _WIN32
+    #include <io.h>
+#else
+    #include <unistd.h>
+#endif
 
 // Helper function: Send all data, handling partial sends and EAGAIN
 static ssize_t send_all(int socket_fd, const char* data, size_t len);
@@ -34,23 +35,40 @@ void init_client_connection(ClientConnection* conn)
 // Helper: Set socket options for high-speed LAN transfer
 static void optimize_socket_for_lan(int socket_fd) {
     // Disable Nagle's algorithm for immediate sending
+#ifdef _WIN32
+    char flag = 1;  // Windows uses char* instead of int*
+    if (setsockopt(socket_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
+#else
     int flag = 1;
     if (setsockopt(socket_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
+#endif
         TraceLog(LOG_WARNING, "Failed to set TCP_NODELAY");
     }
-    
+
     // Increase send buffer to 2MB for bulk transfers
+#ifdef _WIN32
+    char sendbuf[4];
+    *(int*)sendbuf = 2 * 1024 * 1024;
+    if (setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, sendbuf, sizeof(sendbuf)) < 0) {
+#else
     int sendbuf = 2 * 1024 * 1024;
     if (setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, &sendbuf, sizeof(sendbuf)) < 0) {
+#endif
         TraceLog(LOG_WARNING, "Failed to set SO_SNDBUF");
     }
-    
+
     // Increase receive buffer to 2MB
+#ifdef _WIN32
+    char recvbuf[4];
+    *(int*)recvbuf = 2 * 1024 * 1024;
+    if (setsockopt(socket_fd, SOL_SOCKET, SO_RCVBUF, recvbuf, sizeof(recvbuf)) < 0) {
+#else
     int recvbuf = 2 * 1024 * 1024;
     if (setsockopt(socket_fd, SOL_SOCKET, SO_RCVBUF, &recvbuf, sizeof(recvbuf)) < 0) {
+#endif
         TraceLog(LOG_WARNING, "Failed to set SO_RCVBUF");
     }
-    
+
     TraceLog(LOG_INFO, "Socket optimized for LAN: TCP_NODELAY, 2MB buffers");
 }
 
@@ -98,8 +116,13 @@ int connect_to_server(ClientConnection* conn, const char* host, const char* port
     optimize_socket_for_lan(conn->socket_fd);
 
     // set non-blocking mode
+#ifdef _WIN32
+    u_long iMode = 1;
+    ioctlsocket(conn->socket_fd, FIONBIO, &iMode);
+#else
     int flags = fcntl(conn->socket_fd, F_GETFL, 0);
     fcntl(conn->socket_fd, F_SETFL, flags | O_NONBLOCK);
+#endif
 
     // Send username handshake to server
     if (conn->username[0] != '\0') {
@@ -135,7 +158,11 @@ static ssize_t send_all(int socket_fd, const char* data, size_t len)
     }
 
     while (total_sent < len) {
+#ifdef _WIN32
+        ssize_t bytes_sent = send(socket_fd, data + total_sent, len - total_sent, 0);
+#else
         ssize_t bytes_sent = send(socket_fd, data + total_sent, len - total_sent, MSG_NOSIGNAL);
+#endif
 
         if (bytes_sent < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -252,7 +279,7 @@ int recv_msg(ClientConnection* conn, char* buffer, int size)
     if (bytes_recv == 0) {
         TraceLog(LOG_ERROR, "Server closed connection");
         conn->connected = false;
-        close(conn->socket_fd);
+        closesocket(conn->socket_fd);
         return -1;
     }
 

@@ -6,6 +6,7 @@
 
 static volatile sig_atomic_t g_running = 1;
 
+
 static void handle_signal(int sig)
 {
     (void)sig;

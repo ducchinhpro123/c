@@ -1,21 +1,26 @@
+#include "platform.h"
 #include "client_network.h"
 #include "file_transfer.h"
 #include "message.h"
 #include "warning_dialog.h"
 #include "window.h"
 #include <stdio.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef _WIN32
+    #include <sys/stat.h>
+    #include <io.h>
+#else
+    #include <sys/stat.h>
+    #include <unistd.h>
+#endif
 
+#include <raylib.h>
 #define RAYGUI_IMPLEMENTATION
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #include "raygui.h"
 #pragma GCC diagnostic pop
-#include <raylib.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
 
 #define FPS 60
 #define USERNAME_BUFFER 64
@@ -357,7 +362,8 @@ void connection_screen(int* port, char* server_ip, char* port_str, char* usernam
             show_error("Invalid port number");
         } else {
             char tmp[USERNAME_BUFFER];
-            strncpy(tmp, username, USERNAME_BUFFER);
+            strncpy(tmp, username, USERNAME_BUFFER - 1);
+            tmp[USERNAME_BUFFER - 1] = '\0';
             char *username_trimmed = tmp, *e = tmp + strlen(tmp);
 
             while (*username_trimmed && (*username_trimmed == ' ' || *username_trimmed == '\t' || *username_trimmed == '\n' || *username_trimmed == '\r'))
@@ -526,7 +532,11 @@ static void ensure_receive_directory(void)
 {
     struct stat st = { 0 };
     if (stat("received", &st) == -1) {
-        mkdir("received", 0755);
+#ifdef _WIN32
+        _mkdir("received"); // Windows: no mode parameter
+#else
+        mkdir("received", 0755); // Linux: with permissions
+#endif
     }
 }
 
@@ -595,6 +605,7 @@ static void handle_file_packet(char* message)
         }
 
         strncpy(slot->save_path, save_path, sizeof(slot->save_path) - 1);
+        slot->save_path[sizeof(slot->save_path) - 1] = '\0';
         slot->fp = fopen(slot->save_path, "wb");
         if (!slot->fp) {
             add_message(&g_mq, "SYSTEM", "Failed to open file for writing");
@@ -769,8 +780,14 @@ static void start_outgoing_transfer(ClientConnection* conn, const char* file_pat
     slot->chunks_total = (slot->total_bytes + slot->chunk_size - 1) / slot->chunk_size;
     if (conn->username[0] == '\0') {
         strncpy(slot->sender, "Unknown", sizeof(slot->sender) - 1);
+        slot->sender[sizeof(slot->sender) - 1] = '\0';
     } else {
-        strncpy(slot->sender, conn->username, sizeof(slot->sender) - 1);
+        size_t len = strlen(conn->username);
+        if (len >= sizeof(slot->sender)) {
+            len = sizeof(slot->sender) - 1;
+        }
+        memcpy(slot->sender, conn->username, len);
+        slot->sender[len] = '\0';
     }
 
     const char* base_name = strrchr(file_path, '/');
@@ -951,6 +968,12 @@ static void abort_all_transfers(void)
 
 int main()
 {
+
+    if (init_network() != 0) {
+        fprintf(stderr, "Failed to initialize network\n");
+        return 1;
+    }
+
     const char* window_title = "C&F";
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, window_title);
     SetTargetFPS(FPS);
@@ -1030,6 +1053,7 @@ int main()
         EndDrawing();
     }
 
+    cleanup_network();
     CloseWindow();
     return 0;
 }
