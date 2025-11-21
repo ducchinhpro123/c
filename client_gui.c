@@ -1,18 +1,20 @@
-#include "platform.h"
 #include "client_network.h"
 #include "file_transfer.h"
 #include "message.h"
+#include "platform.h"
 #include "warning_dialog.h"
 #include "window.h"
+#include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
-    #include <sys/stat.h>
-    #include <io.h>
+#include <io.h>
+#include <sys/stat.h>
 #else
-    #include <sys/stat.h>
-    #include <unistd.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #include <raylib.h>
@@ -24,6 +26,7 @@
 
 #define FPS 60
 #define USERNAME_BUFFER 64
+#define FILENAME_TRUNCATE_THRESHOLD 25
 
 Message messages[MAX_MESSAGES];
 
@@ -60,6 +63,14 @@ typedef struct {
     size_t total_bytes;
     size_t received_bytes;
 } IncomingTransfer;
+
+typedef struct {
+    char filename[256];
+    long size;
+} FileEntry;
+
+static FileEntry received_files[100]; // max 100 files
+static int received_files_count = 0;
 
 static OutgoingTransfer outgoing_transfers[MAX_ACTIVE_TRANSFERS];
 static IncomingTransfer incoming_transfers[MAX_ACTIVE_TRANSFERS];
@@ -134,7 +145,7 @@ void text_input(ClientConnection* conn, const char* username)
         }
     }
 
-    if (GuiTextBox((Rectangle) { x_pos - ((box_width / 6) / 2), y_pos, box_width, box_height }, text_buffer, MSG_BUFFER, edit_mode)) {
+    if (GuiTextBox((Rectangle) { (x_pos - ((box_width / 6) / 2)) - 150, y_pos, box_width, box_height }, text_buffer, MSG_BUFFER, edit_mode)) {
         // Only toggle if shift-enter wasn't just processed
         if (!shift_enter_pressed) {
             edit_mode = !edit_mode;
@@ -145,7 +156,7 @@ void text_input(ClientConnection* conn, const char* username)
     }
 
     // Button to send text
-    if (GuiButton((Rectangle) { x_pos + box_width - ((box_width / 6) / 2), y_pos, box_width / 6, box_height }, "SEND")) {
+    if (GuiButton((Rectangle) { (x_pos + box_width - ((box_width / 6) / 2)) - 150, y_pos, box_width / 6, box_height }, "SEND")) {
         was_sent = true;
     }
 
@@ -240,6 +251,7 @@ void draw_wrapped_text(Font font, const char* text, Vector2 pos, float font_size
     free(text_cpy);
 }
 
+// Main chat to display messages
 void panel_scroll_msg(Font custom_font)
 {
     int panel_width = 800;
@@ -249,11 +261,27 @@ void panel_scroll_msg(Font custom_font)
     float spacing = 1.0f;
     float gap = 6.0f;
 
-    int x_pos = (WINDOW_WIDTH - panel_width) / 2;
+    int x_pos = ((WINDOW_WIDTH - panel_width) / 2) - 150;
     int y_pos = (WINDOW_HEIGHT - panel_height) / 2;
 
+    float total_len_height = 10.f; // for margin at the top
+    for (int i = 0; i < g_mq.count; i++) {
+        const char* msg = g_mq.messages[i].text;
+        const char* sender = g_mq.messages[i].sender;
+        char sender_label[258];
+        snprintf(sender_label, sizeof(sender_label), "%s:", sender);
+
+        Vector2 sender_size = MeasureTextEx(custom_font, sender_label, font_size, spacing);
+        float avail_width = (panel_width - 15) - sender_size.x - gap;
+
+        int lines_count = calculate_wrapped_lines(custom_font, msg, font_size, spacing, avail_width);
+        float message_height = lines_count * (font_size + spacing);
+        total_len_height += message_height + 15;
+    }
+    total_len_height += 20.f; // extra margin at the bottom
+
     Rectangle panel_rec = { x_pos, y_pos, panel_width, panel_height }; // The position of pannel
-    Rectangle panel_content_rec = { 0, 0, panel_width - 15, 1200 };
+    Rectangle panel_content_rec = { 0, 0, panel_width - 15, total_len_height };
     Rectangle panel_view = { 0 };
 
     static Vector2 panel_scroll = { 0, 0 };
@@ -917,6 +945,10 @@ static void pump_outgoing_transfers(ClientConnection* conn)
 
 static void draw_transfer_status(Font custom_font)
 {
+    if (custom_font.baseSize == 0) {
+        custom_font = GetFontDefault();
+    }
+
     (void)custom_font;
     int x = 40;
     int y = WINDOW_HEIGHT - 180;
@@ -966,9 +998,106 @@ static void abort_all_transfers(void)
     incoming_stream_len = 0;
 }
 
+static void scan_received_folder(void)
+{
+    received_files_count = 0;
+    DIR* dir = opendir("received");
+    if (!dir) {
+        TraceLog(LOG_ERROR, "Failed to open 'received' folder: %s", strerror(errno));
+        return;
+    }
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL && received_files_count < 100) {
+        // Skip "." and ".." directories
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+            continue;
+
+        char filepath[512];
+        snprintf(filepath, sizeof(filepath), "received/%s", entry->d_name);
+
+        struct stat st;
+        if (stat(filepath, &st) == 0 && S_ISREG(st.st_mode)) {
+            strncpy(received_files[received_files_count].filename, entry->d_name, sizeof(received_files[received_files_count].filename) - 1);
+            received_files[received_files_count].size = st.st_size;
+            received_files_count++;
+        }
+    }
+    closedir(dir);
+}
+
+static char* format_file_size(long file_size)
+{
+    static char file_size_str[64];
+
+    if (file_size < 1024) {
+        snprintf(file_size_str, sizeof(file_size_str), "%ld B", file_size);
+        return file_size_str;
+    } else if (file_size < 1024 * 1024) {
+        snprintf(file_size_str, sizeof(file_size_str), "%.2f KB", file_size / 1024.0);
+        return file_size_str;
+    } else {
+        snprintf(file_size_str, sizeof(file_size_str), "%.2f MB", file_size / (1024.0 * 1024.0));
+        return file_size_str;
+    }
+    return file_size_str;
+}
+
+// Display the files next to the main chat interface -> retrieve the files fromm the ./received folder
+static void files_displaying(Font font)
+{
+    int panel_width = 300;
+    int panel_height = 700;
+
+    Rectangle panel_rec = { WINDOW_WIDTH - panel_width, (WINDOW_HEIGHT - panel_height) / 2.f, 250, 300 };
+    // Rectangle panel_content_rec = { 0, 0, 400, 640 };
+    Rectangle panel_view = { 0 };
+    float spacing = 1.f;
+    float line_height = 25.f;
+    float font_size = 13.f;
+
+    float total_len_height = 10.f; // for margin at the top
+    for (int i = 0; i < received_files_count; i++) {
+        int lines_count = 1; // Always 1
+        float message_height = lines_count * (font_size + spacing);
+        total_len_height += message_height + 15;
+    }
+    total_len_height += 20.f; // extra margin at the bottom
+    Rectangle panel_content_rec = { 0, 0, 300, total_len_height };
+
+    static Vector2 panel_scroll = { 0, 0 };
+    GuiScrollPanel(panel_rec, NULL, panel_content_rec, &panel_scroll, &panel_view);
+
+    // Rectangle panel_content_rec = { 0, 0, panel_width - 15, total_len_height };
+    BeginScissorMode(panel_view.x, panel_view.y, panel_view.width, panel_view.height);
+
+    float y_offset = 5.f;
+    if (received_files_count == 0) {
+        DrawTextEx(font, "No files received yet",
+            (Vector2) { panel_view.x + 10, panel_view.y + y_offset + panel_scroll.y },
+            12.f, spacing, DARKGRAY);
+    } else {
+        for (int i = 0; i < received_files_count; i++) {
+            float y_pos = panel_view.y + y_offset + panel_scroll.y;
+            char display_text[128];
+            char size_str[32];
+            snprintf(size_str, sizeof(size_str), "%s", format_file_size(received_files[i].size));
+
+            if (strlen(received_files[i].filename) > FILENAME_TRUNCATE_THRESHOLD) {
+                snprintf(display_text, sizeof(display_text), "%d. %.24s... (%s)", i + 1, received_files[i].filename, size_str);
+            } else {
+                snprintf(display_text, sizeof(display_text), "%d. %.24s (%s)", i + 1, received_files[i].filename, size_str);
+            }
+
+            DrawTextEx(font, display_text, (Vector2) { panel_view.x + 10 + panel_scroll.x, y_pos }, font_size, spacing, BLACK);
+            y_offset += line_height;
+        }
+    }
+    EndScissorMode();
+}
+
 int main()
 {
-
     if (init_network() != 0) {
         fprintf(stderr, "Failed to initialize network\n");
         return 1;
@@ -996,6 +1125,8 @@ int main()
     init_client_connection(&conn);
 
     init_message_queue(&g_mq);
+
+    scan_received_folder();
 
     while (!WindowShouldClose()) {
         // For file tranfer handling
@@ -1038,6 +1169,7 @@ int main()
         welcome_msg(comic_font_bold);
 
         if (is_connected) {
+            files_displaying(comic_font);
             draw_transfer_status(comic_font);
         }
 
