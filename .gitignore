@@ -2,8 +2,14 @@
 /client_gui
 /server_gui
 /server
+/ClientApp_Release
+/received
 *.log
 *.bak
 server_gui
 client_gui
 server
+*.exe
+*.log
+*.zip
+*.bak

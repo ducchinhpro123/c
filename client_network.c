@@ -215,51 +215,39 @@ static ssize_t send_all(int socket_fd, const char* data, size_t len)
     return (ssize_t)total_sent;
 }
 
-int send_msg(ClientConnection* conn, const char* msg)
+int send_packet(ClientConnection* conn, uint8_t type, const void* data, uint32_t length)
 {
     if (!conn->connected || conn->socket_fd == -1) {
         TraceLog(LOG_ERROR, "No connection");
         return -1;
     }
 
-    size_t len = strlen(msg);
-    bool append_newline = (len == 0) || (msg[len - 1] != '\n');
-    size_t total_len = len + (append_newline ? 1 : 0);
-    const size_t STACK_CAP = MSG_BUFFER + 2;
-    char* frame = NULL;
-    char stack_buffer[STACK_CAP];
+    PacketHeader header;
+    header.type = type;
+    header.length = htonl(length);
 
-    if (total_len + 1 <= STACK_CAP) {
-        frame = stack_buffer;
-    } else {
-        frame = malloc(total_len + 1);
-        if (!frame) {
-            TraceLog(LOG_ERROR, "Out of memory while sending message");
+    // Send header
+    if (send_all(conn->socket_fd, (const char*)&header, sizeof(header)) != sizeof(header)) {
+        TraceLog(LOG_ERROR, "Failed to send packet header");
+        conn->connected = false;
+        return -1;
+    }
+
+    // Send body
+    if (length > 0 && data != NULL) {
+        if (send_all(conn->socket_fd, (const char*)data, length) != (ssize_t)length) {
+            TraceLog(LOG_ERROR, "Failed to send packet body");
+            conn->connected = false;
             return -1;
         }
     }
 
-    memcpy(frame, msg, len);
-    if (append_newline) {
-        frame[len] = '\n';
-    }
-    frame[total_len] = '\0';
+    return 0;
+}
 
-    ssize_t bytes_sent = send_all(conn->socket_fd, frame, total_len);
-    if (frame != stack_buffer) {
-        free(frame);
-    }
-
-    if (bytes_sent < 0) {
-        TraceLog(LOG_ERROR, "Failed to send message");
-        conn->connected = false;
-        return -1;
-    } else if ((size_t)bytes_sent < len) {
-        TraceLog(LOG_WARNING, "Only sent %zd of %zu bytes", bytes_sent, len);
-        return (int)bytes_sent;
-    } 
-
-    return (int)bytes_sent;
+int send_msg(ClientConnection* conn, const char* msg)
+{
+    return send_packet(conn, PACKET_TYPE_TEXT, msg, (uint32_t)strlen(msg));
 }
 
 int recv_msg(ClientConnection* conn, char* buffer, int size)

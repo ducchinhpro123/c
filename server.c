@@ -16,6 +16,20 @@ static int client_count = 0;
 static bool server_running = false;
 static server_msg_cb g_on_msg_cb = NULL;
 
+// State machine variables per client
+typedef enum {
+    STATE_HEADER,
+    STATE_BODY
+} StreamState;
+
+typedef struct {
+    StreamState state;
+    PacketHeader header;
+    size_t bytes_needed;
+} ClientState;
+
+static ClientState client_states[MAX_CLIENTS];
+
 
 typedef struct {
     bool active;
@@ -28,9 +42,9 @@ typedef struct {
 
 #define MAX_FILE_SESSIONS 32
 static FileTransferSession file_sessions[MAX_FILE_SESSIONS];
-static void handle_client_message(int client_index, const char* msg);
+
 static void remove_client(int index);
-static bool process_file_message(int client_index, const char* msg);
+static bool process_file_message(int client_index, uint8_t type, const char* data, size_t len);
 static void send_abort_to_sender(int fd, const char* file_id, const char* reason);
 static void broadcast_file_abort(const char* file_id, const char* reason, int skip_fd);
 static FileTransferSession* file_session_find(const char* file_id);
@@ -100,6 +114,11 @@ int server_accept_client()
     strcpy(clients[client_count].ip_addr, inet_ntoa(client_addr.sin_addr));
     clients[client_count].recv_len = 0;
     memset(clients[client_count].recv_buffer, 0, sizeof(clients[client_count].recv_buffer));
+
+    // Initialize client state
+    memset(&client_states[client_count], 0, sizeof(ClientState));
+    client_states[client_count].state = STATE_HEADER;
+    client_states[client_count].bytes_needed = sizeof(PacketHeader);
 
     client_count++;
     char join_msg[512];
@@ -172,6 +191,10 @@ bool init_server()
     return true;
 }
 
+
+
+static void handle_client_packet(int client_index, uint8_t type, const char* data, size_t len);
+
 void server_recv_msgs()
 {
     for (int i = 0; i < client_count; ++i) {
@@ -191,25 +214,34 @@ void server_recv_msgs()
             memcpy(clients[i].recv_buffer + clients[i].recv_len, buffer, bytes_recv);
             clients[i].recv_len += bytes_recv;
 
+            // Initialize state if needed (hacky but works for static array)
+            if (client_states[i].bytes_needed == 0) {
+                client_states[i].state = STATE_HEADER;
+                client_states[i].bytes_needed = sizeof(PacketHeader);
+            }
+
             size_t processed = 0;
-            while (processed < clients[i].recv_len) {
-                void* newline_ptr = memchr(clients[i].recv_buffer + processed, '\n', clients[i].recv_len - processed);
-                if (!newline_ptr)
-                    break;
-
-                size_t msg_len = (size_t)((char*)newline_ptr - (clients[i].recv_buffer + processed));
-                if (msg_len >= BUFFER_SIZE) {
-                    TraceLog(LOG_WARNING, "Message too large from %s, dropping", clients[i].ip_addr);
-                    processed = clients[i].recv_len; // drop buffered data
-                    break;
+            while (clients[i].recv_len - processed >= client_states[i].bytes_needed) {
+                if (client_states[i].state == STATE_HEADER) {
+                    memcpy(&client_states[i].header, clients[i].recv_buffer + processed, sizeof(PacketHeader));
+                    client_states[i].header.length = ntohl(client_states[i].header.length);
+                    processed += sizeof(PacketHeader);
+                    
+                    if (client_states[i].header.length > 0) {
+                        client_states[i].state = STATE_BODY;
+                        client_states[i].bytes_needed = client_states[i].header.length;
+                    } else {
+                        // Empty packet
+                        handle_client_packet(i, client_states[i].header.type, NULL, 0);
+                        client_states[i].state = STATE_HEADER;
+                        client_states[i].bytes_needed = sizeof(PacketHeader);
+                    }
+                } else if (client_states[i].state == STATE_BODY) {
+                    handle_client_packet(i, client_states[i].header.type, clients[i].recv_buffer + processed, client_states[i].header.length);
+                    processed += client_states[i].header.length;
+                    client_states[i].state = STATE_HEADER;
+                    client_states[i].bytes_needed = sizeof(PacketHeader);
                 }
-
-                char message[BUFFER_SIZE];
-                memcpy(message, clients[i].recv_buffer + processed, msg_len);
-                message[msg_len] = '\0';
-                handle_client_message(i, message);
-
-                processed = (size_t)((char*)newline_ptr - clients[i].recv_buffer) + 1;
             }
 
             if (processed > 0) {
@@ -225,6 +257,7 @@ void server_recv_msgs()
             remove_client(i);
             i--;
             if (client_count > 0) {
+                // Broadcast leave message as text
                 server_broadcast_msg(leave_msg, -1);
             }
         } else {
@@ -237,32 +270,56 @@ void server_recv_msgs()
     }
 }
 
-static void handle_client_message(int client_index, const char* msg)
+static void handle_client_packet(int client_index, uint8_t type, const char* data, size_t len)
 {
-    const char* prefix = "USERNAME:";
-    size_t prefix_len = strlen(prefix);
-    if (strncmp(msg, prefix, prefix_len) == 0) {
-        const char* name = msg + prefix_len;
-        if (*name) {
-            snprintf(clients[client_index].username, sizeof(clients[client_index].username), "%s", name);
-            TraceLog(LOG_INFO, "Client %s set username to '%s'", clients[client_index].ip_addr, clients[client_index].username);
+    if (type == PACKET_TYPE_TEXT) {
+        // Ensure null termination
+        char msg[BUFFER_SIZE];
+        if (len >= sizeof(msg)) len = sizeof(msg) - 1;
+        if (len > 0) memcpy(msg, data, len);
+        msg[len] = '\0';
+
+        const char* prefix = "USERNAME:";
+        size_t prefix_len = strlen(prefix);
+        if (strncmp(msg, prefix, prefix_len) == 0) {
+            const char* name = msg + prefix_len;
+            if (*name) {
+                snprintf(clients[client_index].username, sizeof(clients[client_index].username), "%s", name);
+                TraceLog(LOG_INFO, "Client %s set username to '%s'", clients[client_index].ip_addr, clients[client_index].username);
+            }
+            return;
         }
-        return;
-    }
 
-    bool is_file_packet = strncmp(msg, "FILE_", 5) == 0;
-    bool allow_broadcast = true;
-
-    if (is_file_packet) {
-        allow_broadcast = process_file_message(client_index, msg);
-    }
-
-    if (allow_broadcast) {
+        // Broadcast text message
+        // We need to wrap it in a text packet for other clients
+        // But server_broadcast_msg handles that now (we need to update it)
         server_broadcast_msg(msg, clients[client_index].sock_fd);
-    }
 
-    if (!is_file_packet && allow_broadcast && g_on_msg_cb) {
-        g_on_msg_cb(msg, clients[client_index].username);
+        if (g_on_msg_cb) {
+            g_on_msg_cb(msg, clients[client_index].username);
+        }
+    } else if (type >= PACKET_TYPE_FILE_START && type <= PACKET_TYPE_FILE_ABORT) {
+        // Forward file packets
+        // We need to update process_file_message to take raw data
+        if (process_file_message(client_index, type, data, len)) {
+             // Broadcast the packet as-is to other clients
+             // We need a new broadcast function for raw packets
+             // For now, let's update server_broadcast_msg to handle types or create a new one
+             // Let's create a helper to broadcast raw packet
+             
+             PacketHeader header;
+             header.type = type;
+             header.length = htonl(len);
+             
+             // We need to iterate clients and send header + body
+             for (int i = 0; i < client_count; ++i) {
+                 if (clients[i].sock_fd == clients[client_index].sock_fd) continue;
+                 
+                 send_all_to_client(clients[i].sock_fd, (const char*)&header, sizeof(header));
+                 if (len > 0)
+                    send_all_to_client(clients[i].sock_fd, data, len);
+             }
+        }
     }
 }
 
@@ -280,6 +337,7 @@ static void remove_client(int index)
 
     for (int j = index + 1; j < client_count; ++j) {
         clients[j - 1] = clients[j];
+        client_states[j - 1] = client_states[j];
     }
     client_count--;
 }
@@ -371,6 +429,23 @@ static ssize_t send_all_to_client(int socket_fd, const char* data, size_t len)
     return (ssize_t)total_sent;
 }
 
+static int send_packet_to_client(int fd, uint8_t type, const void* data, uint32_t length)
+{
+    PacketHeader header;
+    header.type = type;
+    header.length = htonl(length);
+
+    if (send_all_to_client(fd, (const char*)&header, sizeof(header)) != sizeof(header)) {
+        return -1;
+    }
+    if (length > 0 && data != NULL) {
+        if (send_all_to_client(fd, (const char*)data, length) != (ssize_t)length) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static void send_abort_to_sender(int fd, const char* file_id, const char* reason)
 {
     if (fd < 0 || !file_id || !reason)
@@ -455,28 +530,22 @@ static void cleanup_sessions_for_fd(int fd)
     }
 }
 
-static bool process_file_message(int client_index, const char* msg)
+static bool process_file_message(int client_index, uint8_t type, const char* data, size_t len)
 {
-    if (!msg)
-        return false;
-
-    char buffer[BUFFER_SIZE];
-    strncpy(buffer, msg, sizeof(buffer) - 1);
-    buffer[sizeof(buffer) - 1] = '\0';
-
-    char* save_ptr = NULL;
-    char* type = strtok_r(buffer, "|", &save_ptr);
-    if (!type)
-        return false;
-
-    int sender_fd = clients[client_index].sock_fd;
-
-    if (strcmp(type, "FILE_META") == 0) {
-        const char* sender = strtok_r(NULL, "|", &save_ptr);
+    if (type == PACKET_TYPE_FILE_START) {
+        // Payload: sender|file_id|filename|total_bytes|chunk_size
+        char buffer[BUFFER_SIZE];
+        if (len >= sizeof(buffer)) len = sizeof(buffer) - 1;
+        memcpy(buffer, data, len);
+        buffer[len] = '\0';
+        
+        char* save_ptr = NULL;
+        const char* sender = strtok_r(buffer, "|", &save_ptr);
         const char* file_id = strtok_r(NULL, "|", &save_ptr);
         const char* filename = strtok_r(NULL, "|", &save_ptr);
         const char* total_bytes_str = strtok_r(NULL, "|", &save_ptr);
         const char* chunk_size_str = strtok_r(NULL, "|", &save_ptr);
+        
         if (!sender || !file_id || !filename || !total_bytes_str || !chunk_size_str)
             return false;
 
@@ -484,73 +553,57 @@ static bool process_file_message(int client_index, const char* msg)
 
         unsigned long long total_bytes = strtoull(total_bytes_str, NULL, 10);
         unsigned long chunk_size = strtoul(chunk_size_str, NULL, 10);
-
+        
         if (total_bytes == 0 || total_bytes > FILE_TRANSFER_MAX_SIZE || chunk_size == 0 || chunk_size > FILE_CHUNK_SIZE) {
-            send_abort_to_sender(sender_fd, file_id, "Invalid file metadata");
+            send_abort_to_sender(clients[client_index].sock_fd, file_id, "Invalid file metadata");
             return false;
         }
 
-        FileTransferSession* session = file_session_create(file_id, sender_fd, (size_t)total_bytes, (size_t)chunk_size);
+        FileTransferSession* session = file_session_create(file_id, clients[client_index].sock_fd, (size_t)total_bytes, (size_t)chunk_size);
         if (!session) {
-            send_abort_to_sender(sender_fd, file_id, "Server busy");
+            send_abort_to_sender(clients[client_index].sock_fd, file_id, "Server busy");
             return false;
         }
         session->forwarded_bytes = 0;
         return true;
     }
-
-    if (strcmp(type, "FILE_CHUNK") == 0) {
-        const char* sender = strtok_r(NULL, "|", &save_ptr);
-        const char* file_id = strtok_r(NULL, "|", &save_ptr);
-        const char* chunk_idx = strtok_r(NULL, "|", &save_ptr);
-        const char* payload = strtok_r(NULL, "|", &save_ptr);
-        if (!sender || !file_id || !chunk_idx || !payload)
-            return false;
-
-        (void)sender;
-        (void)chunk_idx;
-
+    else if (type == PACKET_TYPE_FILE_CHUNK) {
+        // Payload: [FileID][Data]
+        if (len <= FILE_ID_LEN) return false;
+        
+        char file_id[FILE_ID_LEN + 1];
+        memcpy(file_id, data, FILE_ID_LEN);
+        file_id[FILE_ID_LEN] = '\0';
+        
         FileTransferSession* session = file_session_find(file_id);
-        if (!session || session->sender_fd != sender_fd) {
-            send_abort_to_sender(sender_fd, file_id, "Unknown file session");
+        if (!session || session->sender_fd != clients[client_index].sock_fd) {
+            send_abort_to_sender(clients[client_index].sock_fd, file_id, "Unknown file session");
             return false;
         }
-
-        size_t payload_len = strlen(payload);
-        if (payload_len > FILE_CHUNK_ENCODED_SIZE + 8) {
-            broadcast_file_abort(file_id, "Chunk payload too large", -1);
-            file_session_remove(session);
-            return false;
+        
+        size_t chunk_len = len - FILE_ID_LEN;
+        if (chunk_len > session->chunk_size + 1024) { // Tolerance
+             broadcast_file_abort(file_id, "Chunk too large", -1);
+             file_session_remove(session);
+             return false;
         }
-
-        size_t approx_bytes = (payload_len / 4) * 3;
-        if (payload_len >= 1 && payload[payload_len - 1] == '=')
-            approx_bytes--;
-        if (payload_len >= 2 && payload[payload_len - 2] == '=')
-            approx_bytes--;
-
-        if (approx_bytes == 0 || approx_bytes > session->chunk_size + 1024) {
-            broadcast_file_abort(file_id, "Chunk size mismatch", -1);
-            file_session_remove(session);
-            return false;
-        }
-
-        if (session->forwarded_bytes + approx_bytes > session->total_bytes + 2048) {
-            broadcast_file_abort(file_id, "Transfer exceeded size", -1);
-            file_session_remove(session);
-            return false;
-        }
-
-        session->forwarded_bytes += approx_bytes;
+        
+        session->forwarded_bytes += chunk_len;
         return true;
     }
-
-    if (strcmp(type, "FILE_END") == 0) {
-        const char* sender = strtok_r(NULL, "|", &save_ptr);
+    else if (type == PACKET_TYPE_FILE_END) {
+        // Payload: sender|file_id
+        char buffer[BUFFER_SIZE];
+        if (len >= sizeof(buffer)) len = sizeof(buffer) - 1;
+        memcpy(buffer, data, len);
+        buffer[len] = '\0';
+        
+        char* save_ptr = NULL;
+        const char* sender = strtok_r(buffer, "|", &save_ptr);
         const char* file_id = strtok_r(NULL, "|", &save_ptr);
-        if (!sender || !file_id)
-            return false;
-
+        
+        if (!sender || !file_id) return false;
+        
         (void)sender;
 
         FileTransferSession* session = file_session_find(file_id);
@@ -567,10 +620,17 @@ static bool process_file_message(int client_index, const char* msg)
         file_session_remove(session);
         return true;
     }
-
-    if (strcmp(type, "FILE_ABORT") == 0) {
-        const char* sender = strtok_r(NULL, "|", &save_ptr);
+    else if (type == PACKET_TYPE_FILE_ABORT) {
+        // Payload: sender|file_id|reason
+        char buffer[BUFFER_SIZE];
+        if (len >= sizeof(buffer)) len = sizeof(buffer) - 1;
+        memcpy(buffer, data, len);
+        buffer[len] = '\0';
+        
+        char* save_ptr = NULL;
+        const char* sender = strtok_r(buffer, "|", &save_ptr);
         const char* file_id = strtok_r(NULL, "|", &save_ptr);
+        
         if (!sender || !file_id)
             return true;
 
@@ -580,42 +640,42 @@ static bool process_file_message(int client_index, const char* msg)
         return true;
     }
 
-    return true;
+    return false;
 }
 
 void server_broadcast_msg(const char* msg, int sender_fd)
 {
     size_t len = strlen(msg);
     
-    // Check if message already has a newline
-    bool has_newline = (len > 0 && msg[len - 1] == '\n');
-    
+    // Construct packet header
+    PacketHeader header;
+    header.type = PACKET_TYPE_TEXT;
+    header.length = htonl((uint32_t)len);
+
     // Track failed clients to remove after iteration
     int failed_clients[MAX_CLIENTS];
     int failed_count = 0;
-    
-    // Log large packet broadcasts
-    // if (len > 10000) {
-    //     TraceLog(LOG_INFO, "Broadcasting large packet: %zu bytes to %d clients", len, client_count - 1);
-    // }
     
     for (int i = 0; i < client_count; ++i) {
         int fd = clients[i].sock_fd;
         if (fd == sender_fd)
             continue;
 
-        ssize_t bytes_sent = send_all_to_client(fd, msg, len);
-        
-        // If no newline, send one
-        if (bytes_sent == (ssize_t)len && !has_newline) {
-            send_all_to_client(fd, "\n", 1);
+        // Send Header
+        ssize_t sent_header = send_all_to_client(fd, (const char*)&header, sizeof(header));
+        if (sent_header != sizeof(header)) {
+             TraceLog(LOG_WARNING, "Failed to send header to %s", clients[i].ip_addr);
+             failed_clients[failed_count++] = i;
+             continue;
         }
-        
-        if (bytes_sent < 0 || (size_t)bytes_sent < len) {
-            TraceLog(LOG_WARNING, "send failed to %s (%s), sent %zd/%zu bytes",
-                     clients[i].username, clients[i].ip_addr, 
-                     bytes_sent < 0 ? 0 : bytes_sent, len);
-            failed_clients[failed_count++] = i;
+
+        // Send Body
+        if (len > 0) {
+            ssize_t sent_body = send_all_to_client(fd, msg, len);
+            if (sent_body != (ssize_t)len) {
+                TraceLog(LOG_WARNING, "Failed to send body to %s", clients[i].ip_addr);
+                failed_clients[failed_count++] = i;
+            }
         }
     }
     

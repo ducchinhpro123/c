@@ -82,7 +82,7 @@ static void start_outgoing_transfer(ClientConnection* conn, const char* file_pat
 static void pump_outgoing_transfers(ClientConnection* conn);
 static void draw_transfer_status(Font custom_font);
 static void process_incoming_stream(const char* data, size_t len);
-static void handle_file_packet(char* message);
+static void handle_file_packet(int type, const char* data, size_t len);
 static void handle_text_payload(char* message);
 static void abort_all_transfers(void);
 static void parse_and_add_chat_message(const char* incoming);
@@ -175,7 +175,7 @@ void text_input(ClientConnection* conn, const char* username)
             char formatted_msg[MSG_BUFFER + 4];
             snprintf(formatted_msg, sizeof(formatted_msg), "%s: %s", username, s);
             int bytes_sent = send_msg(conn, formatted_msg);
-            if (bytes_sent > 0) {
+            if (bytes_sent == 0) {
                 add_message(&g_mq, "me", s);
                 text_buffer[0] = '\0'; // reset
                 was_sent = true;
@@ -568,40 +568,50 @@ static void ensure_receive_directory(void)
     }
 }
 
-static void handle_file_packet(char* message)
+// State machine variables
+typedef enum {
+    STATE_HEADER,
+    STATE_BODY
+} StreamState;
+
+static StreamState stream_state = STATE_HEADER;
+static PacketHeader current_header;
+static size_t bytes_needed = sizeof(PacketHeader);
+
+static void handle_packet(uint8_t type, const char* data, size_t len);
+
+static void handle_file_packet(int type, const char* data, size_t len)
 {
-    char* save_ptr = NULL;
-    char* token = strtok_r(message, "|", &save_ptr);
-    if (!token)
-        return;
+    if (type == PACKET_TYPE_FILE_START) {
+        // Payload: sender|file_id|filename|total_bytes|chunk_size
+        char buffer[1024];
+        if (len >= sizeof(buffer)) len = sizeof(buffer) - 1;
+        memcpy(buffer, data, len);
+        buffer[len] = '\0';
 
-    const char* type = token;
-
-    if (strcmp(type, "FILE_META") == 0) {
-        const char* sender = strtok_r(NULL, "|", &save_ptr);
+        char* save_ptr = NULL;
+        const char* sender = strtok_r(buffer, "|", &save_ptr);
         const char* file_id = strtok_r(NULL, "|", &save_ptr);
         const char* filename = strtok_r(NULL, "|", &save_ptr);
         const char* total_bytes_str = strtok_r(NULL, "|", &save_ptr);
         const char* chunk_size_str = strtok_r(NULL, "|", &save_ptr);
 
-        TraceLog(LOG_INFO, "FILE_META received: sender=%s, file_id=%s, filename=%s, total=%s, chunk=%s",
+        TraceLog(LOG_INFO, "FILE_START received: sender=%s, file_id=%s, filename=%s, total=%s",
             sender ? sender : "NULL",
             file_id ? file_id : "NULL",
             filename ? filename : "NULL",
-            total_bytes_str ? total_bytes_str : "NULL",
-            chunk_size_str ? chunk_size_str : "NULL");
+            total_bytes_str ? total_bytes_str : "NULL");
 
-        if (!sender || !file_id || !filename || !total_bytes_str || !chunk_size_str) {
-            TraceLog(LOG_ERROR, "FILE_META validation failed - missing fields");
+        if (!sender || !file_id || !filename || !total_bytes_str) {
+            TraceLog(LOG_ERROR, "FILE_START validation failed - missing fields");
             return;
         }
-        if (!file_id || !filename || !total_bytes_str || !chunk_size_str)
-            return;
 
         unsigned long long total_bytes = strtoull(total_bytes_str, NULL, 10);
-        unsigned long chunk_size = strtoul(chunk_size_str, NULL, 10);
-
-        if (total_bytes > FILE_TRANSFER_MAX_SIZE || chunk_size == 0)
+        // chunk_size is not strictly needed for receiver but good for info
+        (void)chunk_size_str;
+        
+        if (total_bytes > FILE_TRANSFER_MAX_SIZE)
             return;
 
         IncomingTransfer* slot = get_incoming_transfer(file_id);
@@ -647,31 +657,24 @@ static void handle_file_packet(char* message)
             slot->sender,
             slot->total_bytes / (1024.0 * 1024.0));
         add_message(&g_mq, "SYSTEM", buf);
-    } else if (strcmp(type, "FILE_CHUNK") == 0) {
-        const char* sender = strtok_r(NULL, "|", &save_ptr);
-        const char* file_id = strtok_r(NULL, "|", &save_ptr);
-        const char* chunk_idx_str = strtok_r(NULL, "|", &save_ptr);
-        const char* payload = strtok_r(NULL, "|", &save_ptr);
-        if (!sender || !file_id || !chunk_idx_str || !payload)
-            return;
 
-        (void)sender;
-        if (!file_id || !chunk_idx_str || !payload)
-            return;
+    } else if (type == PACKET_TYPE_FILE_CHUNK) {
+        // Payload: [FileID][Data]
+        if (len <= FILE_ID_LEN) return;
+        
+        char file_id[FILE_ID_LEN + 1];
+        memcpy(file_id, data, FILE_ID_LEN);
+        file_id[FILE_ID_LEN] = '\0';
 
-        (void)chunk_idx_str;
+        const char* chunk_data = data + FILE_ID_LEN;
+        size_t chunk_len = len - FILE_ID_LEN;
 
         IncomingTransfer* slot = get_incoming_transfer(file_id);
         if (!slot || !slot->fp)
             return;
 
-        unsigned char decoded[FILE_CHUNK_SIZE + 4];
-        int decoded_len = base64_decode(payload, strlen(payload), decoded, sizeof(decoded));
-        if (decoded_len <= 0)
-            return;
-
-        size_t written = fwrite(decoded, 1, (size_t)decoded_len, slot->fp);
-        if (written != (size_t)decoded_len) {
+        size_t written = fwrite(chunk_data, 1, chunk_len, slot->fp);
+        if (written != chunk_len) {
             finalize_incoming_transfer(slot, false, "disk write error");
             return;
         }
@@ -680,34 +683,62 @@ static void handle_file_packet(char* message)
         if (slot->received_bytes > slot->total_bytes) {
             finalize_incoming_transfer(slot, false, "received more than expected");
         }
-    } else if (strcmp(type, "FILE_END") == 0) {
-        const char* sender = strtok_r(NULL, "|", &save_ptr);
-        const char* file_id = strtok_r(NULL, "|", &save_ptr);
-        if (!sender || !file_id)
-            return;
 
+    } else if (type == PACKET_TYPE_FILE_END) {
+        // Payload: sender|file_id
+        char buffer[512];
+        if (len >= sizeof(buffer)) len = sizeof(buffer) - 1;
+        memcpy(buffer, data, len);
+        buffer[len] = '\0';
+
+        char* save_ptr = NULL;
+        const char* sender = strtok_r(buffer, "|", &save_ptr);
+        const char* file_id = strtok_r(NULL, "|", &save_ptr);
         (void)sender;
-        if (!file_id)
-            return;
+
+        if (!file_id) return;
 
         IncomingTransfer* slot = get_incoming_transfer(file_id);
-        if (!slot)
-            return;
+        if (!slot) return;
 
         if (slot->received_bytes == slot->total_bytes) {
             finalize_incoming_transfer(slot, true, NULL);
         } else {
             finalize_incoming_transfer(slot, false, "incomplete file");
         }
-    } else if (strcmp(type, "FILE_ABORT") == 0) {
-        const char* sender = strtok_r(NULL, "|", &save_ptr);
+
+    } else if (type == PACKET_TYPE_FILE_ABORT) {
+        // Payload: sender|file_id|reason
+        char buffer[512];
+        if (len >= sizeof(buffer)) len = sizeof(buffer) - 1;
+        memcpy(buffer, data, len);
+        buffer[len] = '\0';
+
+        char* save_ptr = NULL;
+        const char* sender = strtok_r(buffer, "|", &save_ptr);
         const char* file_id = strtok_r(NULL, "|", &save_ptr);
         const char* reason = strtok_r(NULL, "|", &save_ptr);
-
         (void)sender;
+
+        if (!file_id) return;
         IncomingTransfer* slot = get_incoming_transfer(file_id);
         if (slot)
             finalize_incoming_transfer(slot, false, reason ? reason : "Aborted by sender");
+    }
+}
+
+static void handle_packet(uint8_t type, const char* data, size_t len) {
+    if (type == PACKET_TYPE_TEXT) {
+        // Ensure null termination for text
+        if (len >= MSG_BUFFER) len = MSG_BUFFER - 1;
+        char buffer[MSG_BUFFER];
+        if (len > 0) memcpy(buffer, data, len);
+        buffer[len] = '\0';
+        handle_text_payload(buffer);
+    } else if (type >= PACKET_TYPE_FILE_START && type <= PACKET_TYPE_FILE_ABORT) {
+        handle_file_packet(type, data, len);
+    } else {
+        TraceLog(LOG_WARNING, "Unknown packet type: %d", type);
     }
 }
 
@@ -716,49 +747,44 @@ static void process_incoming_stream(const char* data, size_t len)
     if (len == 0)
         return;
 
-    if (len > INCOMING_STREAM_CAPACITY - incoming_stream_len) {
+    if (incoming_stream_len + len > INCOMING_STREAM_CAPACITY) {
         TraceLog(LOG_WARNING, "Incoming stream overflow, dropping data");
         incoming_stream_len = 0;
+        stream_state = STATE_HEADER;
+        bytes_needed = sizeof(PacketHeader);
+        return;
     }
 
     memcpy(incoming_stream + incoming_stream_len, data, len);
     incoming_stream_len += len;
 
     size_t processed = 0;
-    while (processed < incoming_stream_len) {
-        char* newline = memchr(incoming_stream + processed, '\n', incoming_stream_len - processed);
-        if (!newline)
-            break;
-
-        size_t msg_len = (size_t)(newline - (incoming_stream + processed));
-        if (msg_len == 0) {
-            processed = (size_t)(newline - incoming_stream) + 1;
-            continue;
+    while (incoming_stream_len - processed >= bytes_needed) {
+        if (stream_state == STATE_HEADER) {
+            memcpy(&current_header, incoming_stream + processed, sizeof(PacketHeader));
+            current_header.length = ntohl(current_header.length);
+            processed += sizeof(PacketHeader);
+            
+            if (current_header.length > 0) {
+                stream_state = STATE_BODY;
+                bytes_needed = current_header.length;
+            } else {
+                // Empty packet, handle immediately
+                handle_packet(current_header.type, NULL, 0);
+                stream_state = STATE_HEADER;
+                bytes_needed = sizeof(PacketHeader);
+            }
+        } else if (stream_state == STATE_BODY) {
+            handle_packet(current_header.type, incoming_stream + processed, current_header.length);
+            processed += current_header.length;
+            stream_state = STATE_HEADER;
+            bytes_needed = sizeof(PacketHeader);
         }
-
-        if (msg_len >= MSG_BUFFER) {
-            TraceLog(LOG_WARNING, "Message too large, skipping");
-            processed = (size_t)(newline - incoming_stream) + 1;
-            continue;
-        }
-
-        char message[MSG_BUFFER];
-        memcpy(message, incoming_stream + processed, msg_len);
-        message[msg_len] = '\0';
-
-        if (strncmp(message, "FILE_", 5) == 0) {
-            handle_file_packet(message);
-        } else {
-            handle_text_payload(message);
-        }
-
-        processed = (size_t)(newline - incoming_stream) + 1;
     }
 
     if (processed > 0) {
-        size_t remaining = incoming_stream_len - processed;
-        memmove(incoming_stream, incoming_stream + processed, remaining);
-        incoming_stream_len = remaining;
+        incoming_stream_len -= processed;
+        memmove(incoming_stream, incoming_stream + processed, incoming_stream_len);
     }
 }
 
@@ -845,10 +871,12 @@ static void process_file_drop(ClientConnection* conn)
 }
 
 // Send chunks every frame
+// Send chunks every frame
 static void pump_outgoing_transfers(ClientConnection* conn)
 {
     unsigned char chunk_buffer[FILE_CHUNK_SIZE];
-    char encoded_buffer[FILE_CHUNK_ENCODED_SIZE + 4];
+    // Payload buffer: FileID + ChunkData
+    unsigned char payload_buffer[FILE_ID_LEN + FILE_CHUNK_SIZE];
     char message_buffer[MSG_BUFFER];
     const double pump_deadline = GetTime() + (TRANSFER_PUMP_BUDGET_MS / 1000.0);
     bool time_budget_exhausted = false;
@@ -859,21 +887,24 @@ static void pump_outgoing_transfers(ClientConnection* conn)
             continue;
 
         if (!transfer->meta_sent) {
-            int written = snprintf(message_buffer, sizeof(message_buffer), "FILE_META|%s|%s|%s|%zu|%zu",
+            // Send FILE_START packet
+            // Format: sender|file_id|filename|total_bytes|chunk_size
+            int written = snprintf(message_buffer, sizeof(message_buffer), "%s|%s|%s|%zu|%zu",
                 transfer->sender, transfer->file_id, transfer->filename, transfer->total_bytes, transfer->chunk_size);
+            
             if (written <= 0 || written >= (int)sizeof(message_buffer)) {
                 close_outgoing_transfer(conn, transfer, "metadata too large");
                 continue;
             }
 
-            TraceLog(LOG_INFO, "Sending FILE_META: %s", message_buffer);
+            TraceLog(LOG_INFO, "Sending FILE_START: %s", message_buffer);
 
-            if (send_msg(conn, message_buffer) < 0) {
+            if (send_packet(conn, PACKET_TYPE_FILE_START, message_buffer, (uint32_t)strlen(message_buffer)) < 0) {
                 close_outgoing_transfer(conn, transfer, "failed to send metadata");
                 continue;
             }
             transfer->meta_sent = true;
-            TraceLog(LOG_INFO, "FILE_META sent successfully");
+            TraceLog(LOG_INFO, "FILE_START sent successfully");
         }
 
         size_t chunks_sent = 0;
@@ -890,20 +921,16 @@ static void pump_outgoing_transfers(ClientConnection* conn)
                 break;
             }
 
-            int encoded_len = base64_encode(chunk_buffer, read, encoded_buffer, sizeof(encoded_buffer));
-            if (encoded_len <= 0) {
-                close_outgoing_transfer(conn, transfer, "encoding error");
-                break;
+            // Construct payload: [FileID][Data]
+            if (FILE_ID_LEN + read > sizeof(payload_buffer)) {
+                 close_outgoing_transfer(conn, transfer, "chunk too large for buffer");
+                 break;
             }
 
-            int written = snprintf(message_buffer, sizeof(message_buffer), "FILE_CHUNK|%s|%s|%zu|%s",
-                transfer->sender, transfer->file_id, transfer->next_chunk_index, encoded_buffer);
-            if (written <= 0 || written >= (int)sizeof(message_buffer)) {
-                close_outgoing_transfer(conn, transfer, "chunk too large");
-                break;
-            }
+            memcpy(payload_buffer, transfer->file_id, FILE_ID_LEN);
+            memcpy(payload_buffer + FILE_ID_LEN, chunk_buffer, read);
 
-            if (send_msg(conn, message_buffer) < 0) {
+            if (send_packet(conn, PACKET_TYPE_FILE_CHUNK, payload_buffer, (uint32_t)(FILE_ID_LEN + read)) < 0) {
                 close_outgoing_transfer(conn, transfer, "network error");
                 break;
             }
@@ -926,10 +953,13 @@ static void pump_outgoing_transfers(ClientConnection* conn)
                 transfer->fp = NULL;
             }
 
-            int written = snprintf(message_buffer, sizeof(message_buffer), "FILE_END|%s|%s",
+            // Send FILE_END packet
+            // Format: sender|file_id
+            int written = snprintf(message_buffer, sizeof(message_buffer), "%s|%s",
                 transfer->sender, transfer->file_id);
+            
             if (written > 0 && written < (int)sizeof(message_buffer)) {
-                if (send_msg(conn, message_buffer) < 0) {
+                if (send_packet(conn, PACKET_TYPE_FILE_END, message_buffer, (uint32_t)strlen(message_buffer)) < 0) {
                     close_outgoing_transfer(conn, transfer, "failed to finalize");
                     continue;
                 }
@@ -1170,7 +1200,7 @@ int main()
 
         if (is_connected) {
             files_displaying(comic_font);
-            draw_transfer_status(comic_font);
+            // draw_transfer_status(comic_font);
         }
 
         setting_button();
