@@ -245,6 +245,7 @@ int send_packet(ClientConnection* conn, uint8_t type, const void* data, uint32_t
     return 0;
 }
 
+// Send a message, use PACKET_TYPE_TEXT
 int send_msg(ClientConnection* conn, const char* msg)
 {
     return send_packet(conn, PACKET_TYPE_TEXT, msg, (uint32_t)strlen(msg));

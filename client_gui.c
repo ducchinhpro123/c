@@ -91,6 +91,7 @@ static IncomingTransfer* get_incoming_transfer(const char* file_id);
 static IncomingTransfer* get_free_incoming(void);
 static void close_outgoing_transfer(ClientConnection* conn, OutgoingTransfer* transfer, const char* error_msg);
 static void finalize_incoming_transfer(IncomingTransfer* transfer, bool success, const char* reason);
+static bool has_active_transfer(void);
 
 void debugging_button(bool* debugging)
 {
@@ -826,7 +827,7 @@ static void start_outgoing_transfer(ClientConnection* conn, const char* file_pat
     memset(slot, 0, sizeof(*slot));
     slot->active = true;
     slot->fp = fp;
-    slot->total_bytes = (size_t)st.st_size;
+    slot->total_bytes = (size_t)st.st_size; // how many bytes of the file
     slot->chunk_size = FILE_CHUNK_SIZE;
     slot->sent_bytes = 0;
     slot->next_chunk_index = 0;
@@ -867,16 +868,30 @@ static void process_file_drop(ClientConnection* conn)
     for (unsigned int i = 0; i < dropped_files.count; ++i) {
         start_outgoing_transfer(conn, dropped_files.paths[i]);
     }
+    draw_transfer_status(GetFontDefault());
     UnloadDroppedFiles(dropped_files);
 }
 
-// Send chunks every frame
+static bool has_active_transfer(void)
+{
+    for (int i = 0; i < MAX_ACTIVE_TRANSFERS; i++) {
+        if (outgoing_transfers[i].active) {
+            return true;
+        }
+        if (incoming_transfers[i].active) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Send chunks every frame
 static void pump_outgoing_transfers(ClientConnection* conn)
 {
-    unsigned char chunk_buffer[FILE_CHUNK_SIZE];
-    // Payload buffer: FileID + ChunkData
-    unsigned char payload_buffer[FILE_ID_LEN + FILE_CHUNK_SIZE];
+    // Use static buffers to avoid stack overflow with large chunk sizes (e.g. 1MB)
+    // Total stack usage would be > 2MB otherwise, which crashes on Windows (default 1MB stack)
+    static unsigned char chunk_buffer[FILE_CHUNK_SIZE];
+    static unsigned char payload_buffer[FILE_ID_LEN + FILE_CHUNK_SIZE];
     char message_buffer[MSG_BUFFER];
     const double pump_deadline = GetTime() + (TRANSFER_PUMP_BUDGET_MS / 1000.0);
     bool time_budget_exhausted = false;
@@ -892,6 +907,7 @@ static void pump_outgoing_transfers(ClientConnection* conn)
             int written = snprintf(message_buffer, sizeof(message_buffer), "%s|%s|%s|%zu|%zu",
                 transfer->sender, transfer->file_id, transfer->filename, transfer->total_bytes, transfer->chunk_size);
             
+            // Metadata too large or, just fail. see __written <= 0__
             if (written <= 0 || written >= (int)sizeof(message_buffer)) {
                 close_outgoing_transfer(conn, transfer, "metadata too large");
                 continue;
@@ -1200,7 +1216,7 @@ int main()
 
         if (is_connected) {
             files_displaying(comic_font);
-            // draw_transfer_status(comic_font);
+            draw_transfer_status(comic_font);
         }
 
         setting_button();
