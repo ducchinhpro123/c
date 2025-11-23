@@ -94,6 +94,56 @@ static void close_outgoing_transfer(ClientConnection* conn, OutgoingTransfer* tr
 static void finalize_incoming_transfer(IncomingTransfer* transfer, bool success, const char* reason);
 static bool has_active_transfer(void);
 static void scan_received_folder(void);
+// Remove all the files in the received/ folder, this folder contains the fowarded files from other clients
+static void remove_all_files(void);
+// Remove a selected file in the received/ folder
+static void remove_selected_file(const char* filepath);
+
+static void remove_selected_file(const char* filepath)
+{
+    DIR* dir = opendir("received");
+    if (dir == NULL) {
+        TraceLog(LOG_ERROR, "Failed to open 'received' folder to delete files: %s", strerror(errno));
+        return;
+    }
+    char full_filepath[512];
+    snprintf(full_filepath, sizeof(full_filepath), "received/%s", filepath);
+    if (remove(full_filepath) == 0) {
+        TraceLog(LOG_INFO, "Deleted file: %s", full_filepath);
+        scan_received_folder();
+        received_files_count -= 1;
+    } else {
+        TraceLog(LOG_WARNING, "Failed to delete file %s: %s", full_filepath, strerror(errno));
+    }
+
+    closedir(dir);
+}
+
+static void remove_all_files(void)
+{
+    DIR* dir = opendir("received");
+    if (dir == NULL) {
+        TraceLog(LOG_ERROR, "Failed to open 'received' folder to delete files: %s", strerror(errno));
+        return;
+    }
+    struct dirent* entry;
+    char filepath[512];
+    while ((entry = readdir(dir)) != NULL) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) {
+            continue;
+        }
+
+        snprintf(filepath, sizeof(filepath), "received/%s", entry->d_name);
+        if (!remove(filepath)) {
+            TraceLog(LOG_INFO, "Deleted file: %s", filepath);
+        } else {
+            TraceLog(LOG_WARNING, "Failed to delete file %s: %s", filepath, strerror(errno));
+        }
+    }
+
+    closedir(dir);
+    received_files_count = 0;
+}
 
 void debugging_button(bool* debugging)
 {
@@ -1100,9 +1150,11 @@ static char* format_file_size(long file_size)
 static void files_displaying(Font font)
 {
     int panel_width = 300;
-    int panel_height = 700;
+    int panel_height = 400;
+    int y_panel_pos = 700; // Position `y` for panel
+    int x_panel_pos = 320; // Position `x` for panel
 
-    Rectangle panel_rec = { WINDOW_WIDTH - panel_width, (WINDOW_HEIGHT - panel_height) / 2.f, 250, 300 };
+    Rectangle panel_rec = { WINDOW_WIDTH - x_panel_pos, (WINDOW_HEIGHT - y_panel_pos) / 2.f, panel_width, panel_height };
     // Rectangle panel_content_rec = { 0, 0, 400, 640 };
     Rectangle panel_view = { 0 };
     float spacing = 1.f;
@@ -1116,37 +1168,67 @@ static void files_displaying(Font font)
         total_len_height += message_height + 15;
     }
     total_len_height += 20.f; // extra margin at the bottom
-    Rectangle panel_content_rec = { 0, 0, 300, total_len_height };
+    Rectangle panel_content_rec = { 0, 0, panel_width + 30, total_len_height };
 
     static Vector2 panel_scroll = { 0, 0 };
     GuiScrollPanel(panel_rec, NULL, panel_content_rec, &panel_scroll, &panel_view);
 
     // Rectangle panel_content_rec = { 0, 0, panel_width - 15, total_len_height };
     BeginScissorMode(panel_view.x, panel_view.y, panel_view.width, panel_view.height);
+    {
+        float y_offset = 5.f;
+        if (received_files_count == 0) {
+            DrawTextEx(font, "No files received yet",
+                (Vector2) { panel_view.x + 10, panel_view.y + y_offset + panel_scroll.y },
+                12.f, spacing, DARKGRAY);
+        } else {
+            for (int i = 0; i < received_files_count; i++) {
+                float x_pos = panel_view.x + 30 + panel_scroll.x;
+                float y_pos = panel_view.y + y_offset + panel_scroll.y;
 
-    float y_offset = 5.f;
-    if (received_files_count == 0) {
-        DrawTextEx(font, "No files received yet",
-            (Vector2) { panel_view.x + 10, panel_view.y + y_offset + panel_scroll.y },
-            12.f, spacing, DARKGRAY);
-    } else {
-        for (int i = 0; i < received_files_count; i++) {
-            float y_pos = panel_view.y + y_offset + panel_scroll.y;
-            char display_text[128];
-            char size_str[32];
-            snprintf(size_str, sizeof(size_str), "%s", format_file_size(received_files[i].size));
+                float btn_x = panel_view.x + panel_view.width - 30; 
+                float btn_y = panel_view.y + y_offset + panel_scroll.y;
+                // float btn_y = panel_view.y + y_offset + panel_scroll.y;
+                // Delete a file button
+                if (GuiButton((Rectangle) { btn_x, btn_y, 20, 20 }, "#9#")) {
+                    remove_selected_file(received_files[i].filename);
+                }
 
-            if (strlen(received_files[i].filename) > FILENAME_TRUNCATE_THRESHOLD) {
-                snprintf(display_text, sizeof(display_text), "%d. %.24s... (%s)", i + 1, received_files[i].filename, size_str);
-            } else {
-                snprintf(display_text, sizeof(display_text), "%d. %.24s (%s)", i + 1, received_files[i].filename, size_str);
+                char display_text[128];
+                char size_str[32];
+                snprintf(size_str, sizeof(size_str), "%s", format_file_size(received_files[i].size));
+
+                if (strlen(received_files[i].filename) > FILENAME_TRUNCATE_THRESHOLD) {
+                    snprintf(display_text, sizeof(display_text), "%d. %.22s...(%s)", i + 1, received_files[i].filename, size_str);
+                } else {
+                    snprintf(display_text, sizeof(display_text), "%d. %.25s (%s)", i + 1, received_files[i].filename, size_str);
+                }
+
+
+                DrawTextEx(font, display_text, (Vector2) { x_pos, y_pos }, font_size, spacing, BLACK);
+                y_offset += line_height;
             }
-
-            DrawTextEx(font, display_text, (Vector2) { panel_view.x + 10 + panel_scroll.x, y_pos }, font_size, spacing, BLACK);
-            y_offset += line_height;
         }
     }
     EndScissorMode();
+
+    // 1. Save previous style values so we don't affect other buttons
+    int prevBaseColor = GuiGetStyle(BUTTON, BASE_COLOR_NORMAL);
+    int prevTextColor = GuiGetStyle(BUTTON, TEXT_COLOR_NORMAL);
+    int prevBorderColor = GuiGetStyle(BUTTON, BORDER_COLOR_NORMAL);
+    // 2. Set custom styles for this button (Red Theme)
+    GuiSetStyle(BUTTON, BASE_COLOR_NORMAL, ColorToInt(RED));
+    GuiSetStyle(BUTTON, TEXT_COLOR_NORMAL, ColorToInt(WHITE));
+    GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL, ColorToInt(MAROON));
+    // 3. Draw the button
+    if (received_files_count > 0 && GuiButton((Rectangle) { WINDOW_WIDTH - panel_width, ((WINDOW_HEIGHT - panel_height) / 2.f) + 270, 120, 30}, "#9# Remove all files")) {
+        remove_all_files();
+        scan_received_folder();
+    }
+    // 4. Restore previous styles
+    GuiSetStyle(BUTTON, BASE_COLOR_NORMAL, prevBaseColor);
+    GuiSetStyle(BUTTON, TEXT_COLOR_NORMAL, prevTextColor);
+    GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL, prevBorderColor);
 }
 
 int main()

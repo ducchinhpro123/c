@@ -429,22 +429,22 @@ static ssize_t send_all_to_client(int socket_fd, const char* data, size_t len)
     return (ssize_t)total_sent;
 }
 
-static int send_packet_to_client(int fd, uint8_t type, const void* data, uint32_t length)
-{
-    PacketHeader header;
-    header.type = type;
-    header.length = htonl(length);
-
-    if (send_all_to_client(fd, (const char*)&header, sizeof(header)) != sizeof(header)) {
-        return -1;
-    }
-    if (length > 0 && data != NULL) {
-        if (send_all_to_client(fd, (const char*)data, length) != (ssize_t)length) {
-            return -1;
-        }
-    }
-    return 0;
-}
+// static int send_packet_to_client(int fd, uint8_t type, const void* data, uint32_t length)
+// {
+//     PacketHeader header;
+//     header.type = type;
+//     header.length = htonl(length);
+//
+//     if (send_all_to_client(fd, (const char*)&header, sizeof(header)) != sizeof(header)) {
+//         return -1;
+//     }
+//     if (length > 0 && data != NULL) {
+//         if (send_all_to_client(fd, (const char*)data, length) != (ssize_t)length) {
+//             return -1;
+//         }
+//     }
+//     return 0;
+// }
 
 static void send_abort_to_sender(int fd, const char* file_id, const char* reason)
 {
