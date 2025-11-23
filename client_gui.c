@@ -77,6 +77,7 @@ static IncomingTransfer incoming_transfers[MAX_ACTIVE_TRANSFERS];
 static char incoming_stream[INCOMING_STREAM_CAPACITY];
 static size_t incoming_stream_len = 0;
 
+static void text_input(ClientConnection* conn, const char* username);
 static void process_file_drop(ClientConnection* conn);
 static void start_outgoing_transfer(ClientConnection* conn, const char* file_path);
 static void pump_outgoing_transfers(ClientConnection* conn);
@@ -92,6 +93,7 @@ static IncomingTransfer* get_free_incoming(void);
 static void close_outgoing_transfer(ClientConnection* conn, OutgoingTransfer* transfer, const char* error_msg);
 static void finalize_incoming_transfer(IncomingTransfer* transfer, bool success, const char* reason);
 static bool has_active_transfer(void);
+static void scan_received_folder(void);
 
 void debugging_button(bool* debugging)
 {
@@ -120,7 +122,7 @@ void center_text_horizontally(const char* text, int font_size, int y, Color colo
     }
 }
 
-void text_input(ClientConnection* conn, const char* username)
+static void text_input(ClientConnection* conn, const char* username)
 {
     float box_width = 500;
     float box_height = 50;
@@ -512,12 +514,15 @@ static void finalize_incoming_transfer(IncomingTransfer* transfer, bool success,
             sender_copy[0] ? sender_copy : "peer",
             total_bytes_copy);
         add_message(&g_mq, "SYSTEM", buf);
+        // Rescan received folder
+        scan_received_folder(); 
     } else if (reason) {
         char buf[512];
         snprintf(buf, sizeof(buf), "SYSTEM: Failed to receive %.200s (%s)",
             filename_copy[0] ? filename_copy : "file",
             reason);
         add_message(&g_mq, "SYSTEM", buf);
+
     }
 
     memset(transfer, 0, sizeof(*transfer));
@@ -985,6 +990,8 @@ static void pump_outgoing_transfers(ClientConnection* conn)
             snprintf(buf, sizeof(buf), "Finished sending %s", transfer->filename);
             add_message(&g_mq, "SYSTEM", buf);
             memset(transfer, 0, sizeof(*transfer));
+
+            scan_received_folder();
         }
     }
 }
@@ -1216,7 +1223,9 @@ int main()
 
         if (is_connected) {
             files_displaying(comic_font);
-            draw_transfer_status(comic_font);
+            if (has_active_transfer()) {
+                draw_transfer_status(comic_font);
+            }
         }
 
         setting_button();
