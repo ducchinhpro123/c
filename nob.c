@@ -27,6 +27,7 @@ int main(int argc, char **argv)
     cmd.count = 0;
     nob_cmd_append(&cmd, "gcc");
     nob_cmd_append(&cmd, "-Wall", "-Wextra", "-I./src");
+    nob_cmd_append(&cmd, "-I./thirdparty/raylib-5.5_linux_amd64/include"); // Local Raylib include
     nob_cmd_append(&cmd, "-o", "build/server");
     // Assuming server_cli.c contains the main function for the CLI server
     nob_cmd_append(&cmd, "src/server.c", "src/server_cli.c", "src/message.c", "src/file_transfer.c");
