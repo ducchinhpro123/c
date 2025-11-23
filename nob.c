@@ -19,6 +19,7 @@ int main(int argc, char **argv)
     nob_cmd_append(&cmd, "-o", "build/client_gui");
     nob_cmd_append(&cmd, "src/client_gui.c", "src/warning_dialog.c", "src/client_network.c", "src/message.c", "src/file_transfer.c");
     nob_cmd_append(&cmd, "-L./thirdparty/raylib-5.5_linux_amd64/lib"); // Local Raylib lib
+    nob_cmd_append(&cmd, "-Wl,-rpath,$ORIGIN/../thirdparty/raylib-5.5_linux_amd64/lib"); // Add rpath
     nob_cmd_append(&cmd, "-lraylib", "-lpthread", "-ldl", "-lrt", "-lX11", "-lm");
     if (!nob_cmd_run_sync(cmd)) return 1;
 
@@ -32,6 +33,7 @@ int main(int argc, char **argv)
     // Assuming server_cli.c contains the main function for the CLI server
     nob_cmd_append(&cmd, "src/server.c", "src/server_cli.c", "src/message.c", "src/file_transfer.c");
     nob_cmd_append(&cmd, "-L./thirdparty/raylib-5.5_linux_amd64/lib"); // Local Raylib lib
+    nob_cmd_append(&cmd, "-Wl,-rpath,$ORIGIN/../thirdparty/raylib-5.5_linux_amd64/lib"); // Add rpath
     nob_cmd_append(&cmd, "-lraylib", "-lpthread", "-ldl", "-lrt", "-lX11", "-lm"); 
     if (!nob_cmd_run_sync(cmd)) return 1;
 
