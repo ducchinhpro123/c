@@ -21,10 +21,15 @@ typedef struct {
 } PacketHeader;
 #pragma pack(pop)
 
+#include <pthread.h>
+#include "packet_queue.h"
+
 typedef struct {
     int socket_fd;
     bool connected;
     char username[256];
+    PacketQueue queue;
+    pthread_t sender_thread;
 } ClientConnection;
 
 // Initialize connection

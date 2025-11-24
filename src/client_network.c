@@ -16,20 +16,50 @@
     #include <unistd.h>
 #endif
 
+#include "packet_queue.h"
+
+
+
 // Helper function: Send all data, handling partial sends and EAGAIN
 static ssize_t send_all(int socket_fd, const char* data, size_t len);
 
-/* typedef struct { */
-/*     int socket_fd; */
-/*     bool connected; */
-/*     char username[256]; */
-/* } ClientConnection; */
+// Sender thread function
+static void* sender_thread_func(void* arg) {
+    ClientConnection* conn = (ClientConnection*)arg;
+    
+    while (conn->connected || conn->queue.count > 0) {
+        Packet* pkt = pq_pop(&conn->queue);
+        if (!pkt) continue;
+
+        if (conn->connected && conn->socket_fd != -1) {
+            PacketHeader header;
+            header.type = pkt->type;
+            header.length = htonl(pkt->length);
+
+            // Send header
+            if (send_all(conn->socket_fd, (const char*)&header, sizeof(header)) != sizeof(header)) {
+                TraceLog(LOG_ERROR, "Failed to send packet header in thread");
+                conn->connected = false;
+            } else if (pkt->length > 0 && pkt->data != NULL) {
+                // Send body
+                if (send_all(conn->socket_fd, (const char*)pkt->data, pkt->length) != (ssize_t)pkt->length) {
+                    TraceLog(LOG_ERROR, "Failed to send packet body in thread");
+                    conn->connected = false;
+                }
+            }
+        }
+        
+        pq_free_packet(pkt);
+    }
+    return NULL;
+}
 
 void init_client_connection(ClientConnection* conn)
 {
     conn->socket_fd = -1;
     conn->connected = false;
     memset(conn->username, 0, sizeof(conn->username));
+    pq_init(&conn->queue);
 }
 
 // Helper: Set socket options for high-speed LAN transfer
@@ -137,8 +167,15 @@ int connect_to_server(ClientConnection* conn, const char* host, const char* port
 
     TraceLog(LOG_INFO, "Connected to %s:%s", host, port);
 
+    // Start sender thread
+    if (pthread_create(&conn->sender_thread, NULL, sender_thread_func, conn) != 0) {
+        TraceLog(LOG_ERROR, "Failed to create sender thread");
+        conn->connected = false;
+        close(conn->socket_fd);
+        return -1;
+    }
+
     return 0;
-    // connect(int fd, const struct sockaddr *addr, socklen_t len);
 }
 
 // Helper function: Send all data, handling partial sends and EAGAIN
@@ -217,31 +254,12 @@ static ssize_t send_all(int socket_fd, const char* data, size_t len)
 
 int send_packet(ClientConnection* conn, uint8_t type, const void* data, uint32_t length)
 {
-    if (!conn->connected || conn->socket_fd == -1) {
+    if (!conn->connected) {
         TraceLog(LOG_ERROR, "No connection");
         return -1;
     }
 
-    PacketHeader header;
-    header.type = type;
-    header.length = htonl(length);
-
-    // Send header
-    if (send_all(conn->socket_fd, (const char*)&header, sizeof(header)) != sizeof(header)) {
-        TraceLog(LOG_ERROR, "Failed to send packet header");
-        conn->connected = false;
-        return -1;
-    }
-
-    // Send body
-    if (length > 0 && data != NULL) {
-        if (send_all(conn->socket_fd, (const char*)data, length) != (ssize_t)length) {
-            TraceLog(LOG_ERROR, "Failed to send packet body");
-            conn->connected = false;
-            return -1;
-        }
-    }
-
+    pq_push(&conn->queue, type, data, length);
     return 0;
 }
 

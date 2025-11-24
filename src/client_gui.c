@@ -1,6 +1,7 @@
 #include "client_network.h"
 #include "file_transfer.h"
 #include "message.h"
+#include "packet_queue.h"
 #include "platform.h"
 #include "warning_dialog.h"
 #include "window.h"
@@ -941,6 +942,8 @@ static bool has_active_transfer(void)
 }
 
 // Send chunks every frame
+// Send chunks every frame
+// Send chunks every frame
 static void pump_outgoing_transfers(ClientConnection* conn)
 {
     // Use static buffers to avoid stack overflow with large chunk sizes (e.g. 1MB)
@@ -948,100 +951,79 @@ static void pump_outgoing_transfers(ClientConnection* conn)
     static unsigned char chunk_buffer[FILE_CHUNK_SIZE];
     static unsigned char payload_buffer[FILE_ID_LEN + FILE_CHUNK_SIZE];
     char message_buffer[MSG_BUFFER];
-    const double pump_deadline = GetTime() + (TRANSFER_PUMP_BUDGET_MS / 1000.0);
-    bool time_budget_exhausted = false;
 
-    for (int i = 0; i < MAX_ACTIVE_TRANSFERS && !time_budget_exhausted; ++i) {
-        OutgoingTransfer* transfer = &outgoing_transfers[i];
-        if (!transfer->active)
+    if (!conn->connected)
+        return;
+
+    // Throttle based on queue size (e.g., max 10MB pending)
+    // This prevents memory exhaustion if disk read > network send
+    const size_t MAX_QUEUE_SIZE = 10 * 1024 * 1024; 
+    if (pq_get_data_size(&conn->queue) > MAX_QUEUE_SIZE) {
+        return; // Wait for queue to drain
+    }
+
+    for (int i = 0; i < MAX_ACTIVE_TRANSFERS; ++i) {
+        OutgoingTransfer* t = &outgoing_transfers[i];
+        if (!t->active)
             continue;
 
-        if (!transfer->meta_sent) {
-            // Send FILE_START packet
+        // Send metadata if not sent yet
+        if (!t->meta_sent) {
+            char meta[1024];
             // Format: sender|file_id|filename|total_bytes|chunk_size
-            int written = snprintf(message_buffer, sizeof(message_buffer), "%s|%s|%s|%zu|%zu",
-                transfer->sender, transfer->file_id, transfer->filename, transfer->total_bytes, transfer->chunk_size);
+            snprintf(meta, sizeof(meta), "%s|%s|%s|%zu|%zu",
+                t->sender, t->file_id, t->filename, t->total_bytes, t->chunk_size);
             
-            // Metadata too large or, just fail. see __written <= 0__
-            if (written <= 0 || written >= (int)sizeof(message_buffer)) {
-                close_outgoing_transfer(conn, transfer, "metadata too large");
-                continue;
-            }
-
-            TraceLog(LOG_INFO, "Sending FILE_START: %s", message_buffer);
-
-            if (send_packet(conn, PACKET_TYPE_FILE_START, message_buffer, (uint32_t)strlen(message_buffer)) < 0) {
-                close_outgoing_transfer(conn, transfer, "failed to send metadata");
-                continue;
-            }
-            transfer->meta_sent = true;
-            TraceLog(LOG_INFO, "FILE_START sent successfully");
+            send_packet(conn, PACKET_TYPE_FILE_START, meta, (uint32_t)strlen(meta));
+            t->meta_sent = true;
         }
 
-        size_t chunks_sent = 0;
-        while (transfer->sent_bytes < transfer->total_bytes && chunks_sent < MAX_CHUNKS_PER_BATCH && !time_budget_exhausted) {
-            size_t bytes_to_read = transfer->chunk_size;
-            if (bytes_to_read > transfer->total_bytes - transfer->sent_bytes)
-                bytes_to_read = transfer->total_bytes - transfer->sent_bytes;
+        // Send chunks
+        // We can send multiple chunks per frame since we are just pushing to memory now
+        // But let's limit it to avoid spiking memory usage too fast in one frame
+        int chunks_sent_this_frame = 0;
+        const int MAX_CHUNKS_PER_FRAME = 5; 
 
-            size_t read = fread(chunk_buffer, 1, bytes_to_read, transfer->fp);
-            if (read == 0) {
-                if (ferror(transfer->fp)) {
-                    close_outgoing_transfer(conn, transfer, "read error");
+        while (t->sent_bytes < t->total_bytes && chunks_sent_this_frame < MAX_CHUNKS_PER_FRAME) {
+            // Check queue size again inside loop
+            if (pq_get_data_size(&conn->queue) > MAX_QUEUE_SIZE)
+                break;
+
+            size_t remaining = t->total_bytes - t->sent_bytes;
+            size_t to_read = (remaining > t->chunk_size) ? t->chunk_size : remaining;
+
+            size_t read_count = fread(chunk_buffer, 1, to_read, t->fp);
+            if (read_count > 0) {
+                // Construct payload: [FileID][Data]
+                memcpy(payload_buffer, t->file_id, FILE_ID_LEN);
+                memcpy(payload_buffer + FILE_ID_LEN, chunk_buffer, read_count);
+
+                send_packet(conn, PACKET_TYPE_FILE_CHUNK, payload_buffer, (uint32_t)(FILE_ID_LEN + read_count));
+
+                t->sent_bytes += read_count;
+                t->next_chunk_index++;
+                chunks_sent_this_frame++;
+            }
+
+            if (read_count < to_read) {
+                if (ferror(t->fp)) {
+                    close_outgoing_transfer(conn, t, "File read error");
                 }
                 break;
             }
-
-            // Construct payload: [FileID][Data]
-            if (FILE_ID_LEN + read > sizeof(payload_buffer)) {
-                 close_outgoing_transfer(conn, transfer, "chunk too large for buffer");
-                 break;
-            }
-
-            memcpy(payload_buffer, transfer->file_id, FILE_ID_LEN);
-            memcpy(payload_buffer + FILE_ID_LEN, chunk_buffer, read);
-
-            if (send_packet(conn, PACKET_TYPE_FILE_CHUNK, payload_buffer, (uint32_t)(FILE_ID_LEN + read)) < 0) {
-                close_outgoing_transfer(conn, transfer, "network error");
-                break;
-            }
-
-            transfer->sent_bytes += read;
-            transfer->next_chunk_index++;
-            chunks_sent++;
-
-            if (GetTime() >= pump_deadline) {
-                time_budget_exhausted = true;
-            }
         }
 
-        if (!transfer->active)
-            continue;
-
-        if (transfer->sent_bytes >= transfer->total_bytes) {
-            if (transfer->fp) {
-                fclose(transfer->fp);
-                transfer->fp = NULL;
-            }
-
-            // Send FILE_END packet
-            // Format: sender|file_id
-            int written = snprintf(message_buffer, sizeof(message_buffer), "%s|%s",
-                transfer->sender, transfer->file_id);
-            
-            if (written > 0 && written < (int)sizeof(message_buffer)) {
-                if (send_packet(conn, PACKET_TYPE_FILE_END, message_buffer, (uint32_t)strlen(message_buffer)) < 0) {
-                    close_outgoing_transfer(conn, transfer, "failed to finalize");
-                    continue;
-                }
-            }
+        if (t->sent_bytes >= t->total_bytes) {
+            // Send END packet
+            snprintf(message_buffer, sizeof(message_buffer), "%s|%s", t->sender, t->file_id);
+            send_packet(conn, PACKET_TYPE_FILE_END, message_buffer, (uint32_t)strlen(message_buffer));
 
             char buf[512];
-            snprintf(buf, sizeof(buf), "Finished sending %s", transfer->filename);
+            snprintf(buf, sizeof(buf), "SYSTEM: Finished sending %s", t->filename);
             add_message(&g_mq, "SYSTEM", buf);
-            memset(transfer, 0, sizeof(*transfer));
 
-            scan_received_folder();
+            close_outgoing_transfer(conn, t, NULL);
+            scan_received_folder(); // Moved here to be inside the function and after transfer completion
         }
     }
 }
@@ -1183,7 +1165,7 @@ static void files_displaying(Font font)
                 12.f, spacing, DARKGRAY);
         } else {
             for (int i = 0; i < received_files_count; i++) {
-                float x_pos = panel_view.x + 30 + panel_scroll.x;
+                float x_pos = panel_view.x + 10 + panel_scroll.x;
                 float y_pos = panel_view.y + y_offset + panel_scroll.y;
 
                 float btn_x = panel_view.x + panel_view.width - 30; 
