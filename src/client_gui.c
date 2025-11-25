@@ -73,11 +73,14 @@ typedef struct {
 static FileEntry received_files[100]; // max 100 files
 static int received_files_count = 0;
 
+static bool should_scroll_to_bottom = false;
+
 static OutgoingTransfer outgoing_transfers[MAX_ACTIVE_TRANSFERS];
 static IncomingTransfer incoming_transfers[MAX_ACTIVE_TRANSFERS];
 static char incoming_stream[INCOMING_STREAM_CAPACITY];
 static size_t incoming_stream_len = 0;
 
+static void panel_scroll_msg(Font custom_font);
 static void text_input(ClientConnection* conn, const char* username);
 static void process_file_drop(ClientConnection* conn);
 static void start_outgoing_transfer(ClientConnection* conn, const char* file_path);
@@ -235,6 +238,7 @@ static void text_input(ClientConnection* conn, const char* username)
                 was_sent = true;
                 edit_mode = true;
                 TraceLog(LOG_INFO, "Sent: %s", formatted_msg);
+                should_scroll_to_bottom = true;
             }
         } else {
             was_sent = false;
@@ -306,7 +310,7 @@ void draw_wrapped_text(Font font, const char* text, Vector2 pos, float font_size
 }
 
 // Main chat to display messages
-void panel_scroll_msg(Font custom_font)
+static void panel_scroll_msg(Font custom_font)
 {
     int panel_width = 800;
     int panel_height = 700;
@@ -344,35 +348,42 @@ void panel_scroll_msg(Font custom_font)
     float cumulative_height = 10; // Top padding
     // BEGIN SCISSOR MODE
     BeginScissorMode(panel_view.x, panel_view.y, panel_view.width, panel_view.height);
-    for (int i = 0; i < g_mq.count; i++) {
-        const char* sender = g_mq.messages[i].sender;
-        const char* msg = g_mq.messages[i].text;
+    {
+        for (int i = 0; i < g_mq.count; i++) {
+            const char* sender = g_mq.messages[i].sender;
+            const char* msg = g_mq.messages[i].text;
 
-        int pos_x_sender_label = panel_view.x + 10 - panel_scroll.x; // Position x for sender label
+            int pos_x_sender_label = panel_view.x + 10 - panel_scroll.x; // Position x for sender label
 
-        char sender_label[258];
-        snprintf(sender_label, sizeof(sender_label), "%s:", sender);
-        Vector2 sender_size = MeasureTextEx(custom_font, sender_label, font_size, spacing);
-        float avail_width = panel_view.width - sender_size.x - gap;
-        // Position x for message
-        float pos_x_msg = pos_x_sender_label + sender_size.x + gap;
+            char sender_label[258];
+            snprintf(sender_label, sizeof(sender_label), "%s:", sender);
+            Vector2 sender_size = MeasureTextEx(custom_font, sender_label, font_size, spacing);
+            float avail_width = panel_view.width - sender_size.x - gap;
+            // Position x for message
+            float pos_x_msg = pos_x_sender_label + sender_size.x + gap;
 
-        int lines_count = calculate_wrapped_lines(custom_font, msg, font_size, spacing, avail_width);
-        float message_height = lines_count * (font_size + spacing);
+            int lines_count = calculate_wrapped_lines(custom_font, msg, font_size, spacing, avail_width);
+            float message_height = lines_count * (font_size + spacing);
 
-        int y_pos_msg = panel_view.y + cumulative_height + panel_scroll.y;
+            int y_pos_msg = panel_view.y + cumulative_height + panel_scroll.y;
 
-        if (!strcmp(sender_label, "SYSTEM:")) {
-            DrawTextEx(custom_font, sender_label, (Vector2) { pos_x_sender_label, y_pos_msg }, font_size, spacing, RED);
-        } else if (!strcmp(sender_label, "me:")) {
-            DrawTextEx(custom_font, sender_label, (Vector2) { pos_x_sender_label, y_pos_msg }, font_size, spacing, MAROON);
-        } else {
-            DrawTextEx(custom_font, sender_label, (Vector2) { pos_x_sender_label, y_pos_msg }, font_size, spacing, GREEN);
+            if (!strcmp(sender_label, "SYSTEM:")) {
+                DrawTextEx(custom_font, sender_label, (Vector2) { pos_x_sender_label, y_pos_msg }, font_size, spacing, RED);
+            } else if (!strcmp(sender_label, "me:")) {
+                DrawTextEx(custom_font, sender_label, (Vector2) { pos_x_sender_label, y_pos_msg }, font_size, spacing, MAROON);
+            } else {
+                DrawTextEx(custom_font, sender_label, (Vector2) { pos_x_sender_label, y_pos_msg }, font_size, spacing, GREEN);
+            }
+
+            draw_wrapped_text(custom_font, msg, (Vector2) { pos_x_msg, y_pos_msg }, font_size, spacing, avail_width, BLACK);
+
+            cumulative_height += message_height + 15; // 15px gap between messages
         }
 
-        draw_wrapped_text(custom_font, msg, (Vector2) { pos_x_msg, y_pos_msg }, font_size, spacing, avail_width, BLACK);
-
-        cumulative_height += message_height + 15; // 15px gap between messages
+        if (should_scroll_to_bottom) {
+            panel_scroll.y = -(total_len_height - panel_height);
+            should_scroll_to_bottom = false;
+        }
     }
     EndScissorMode();
 }
@@ -566,14 +577,13 @@ static void finalize_incoming_transfer(IncomingTransfer* transfer, bool success,
             total_bytes_copy);
         add_message(&g_mq, "SYSTEM", buf);
         // Rescan received folder
-        scan_received_folder(); 
+        scan_received_folder();
     } else if (reason) {
         char buf[512];
         snprintf(buf, sizeof(buf), "SYSTEM: Failed to receive %.200s (%s)",
             filename_copy[0] ? filename_copy : "file",
             reason);
         add_message(&g_mq, "SYSTEM", buf);
-
     }
 
     memset(transfer, 0, sizeof(*transfer));
@@ -642,7 +652,8 @@ static void handle_file_packet(int type, const char* data, size_t len)
     if (type == PACKET_TYPE_FILE_START) {
         // Payload: sender|file_id|filename|total_bytes|chunk_size
         char buffer[1024];
-        if (len >= sizeof(buffer)) len = sizeof(buffer) - 1;
+        if (len >= sizeof(buffer))
+            len = sizeof(buffer) - 1;
         memcpy(buffer, data, len);
         buffer[len] = '\0';
 
@@ -667,7 +678,7 @@ static void handle_file_packet(int type, const char* data, size_t len)
         unsigned long long total_bytes = strtoull(total_bytes_str, NULL, 10);
         // chunk_size is not strictly needed for receiver but good for info
         (void)chunk_size_str;
-        
+
         if (total_bytes > FILE_TRANSFER_MAX_SIZE)
             return;
 
@@ -717,8 +728,9 @@ static void handle_file_packet(int type, const char* data, size_t len)
 
     } else if (type == PACKET_TYPE_FILE_CHUNK) {
         // Payload: [FileID][Data]
-        if (len <= FILE_ID_LEN) return;
-        
+        if (len <= FILE_ID_LEN)
+            return;
+
         char file_id[FILE_ID_LEN + 1];
         memcpy(file_id, data, FILE_ID_LEN);
         file_id[FILE_ID_LEN] = '\0';
@@ -744,7 +756,8 @@ static void handle_file_packet(int type, const char* data, size_t len)
     } else if (type == PACKET_TYPE_FILE_END) {
         // Payload: sender|file_id
         char buffer[512];
-        if (len >= sizeof(buffer)) len = sizeof(buffer) - 1;
+        if (len >= sizeof(buffer))
+            len = sizeof(buffer) - 1;
         memcpy(buffer, data, len);
         buffer[len] = '\0';
 
@@ -753,10 +766,12 @@ static void handle_file_packet(int type, const char* data, size_t len)
         const char* file_id = strtok_r(NULL, "|", &save_ptr);
         (void)sender;
 
-        if (!file_id) return;
+        if (!file_id)
+            return;
 
         IncomingTransfer* slot = get_incoming_transfer(file_id);
-        if (!slot) return;
+        if (!slot)
+            return;
 
         if (slot->received_bytes == slot->total_bytes) {
             finalize_incoming_transfer(slot, true, NULL);
@@ -767,7 +782,8 @@ static void handle_file_packet(int type, const char* data, size_t len)
     } else if (type == PACKET_TYPE_FILE_ABORT) {
         // Payload: sender|file_id|reason
         char buffer[512];
-        if (len >= sizeof(buffer)) len = sizeof(buffer) - 1;
+        if (len >= sizeof(buffer))
+            len = sizeof(buffer) - 1;
         memcpy(buffer, data, len);
         buffer[len] = '\0';
 
@@ -777,19 +793,23 @@ static void handle_file_packet(int type, const char* data, size_t len)
         const char* reason = strtok_r(NULL, "|", &save_ptr);
         (void)sender;
 
-        if (!file_id) return;
+        if (!file_id)
+            return;
         IncomingTransfer* slot = get_incoming_transfer(file_id);
         if (slot)
             finalize_incoming_transfer(slot, false, reason ? reason : "Aborted by sender");
     }
 }
 
-static void handle_packet(uint8_t type, const char* data, size_t len) {
+static void handle_packet(uint8_t type, const char* data, size_t len)
+{
     if (type == PACKET_TYPE_TEXT) {
         // Ensure null termination for text
-        if (len >= MSG_BUFFER) len = MSG_BUFFER - 1;
+        if (len >= MSG_BUFFER)
+            len = MSG_BUFFER - 1;
         char buffer[MSG_BUFFER];
-        if (len > 0) memcpy(buffer, data, len);
+        if (len > 0)
+            memcpy(buffer, data, len);
         buffer[len] = '\0';
         handle_text_payload(buffer);
     } else if (type >= PACKET_TYPE_FILE_START && type <= PACKET_TYPE_FILE_ABORT) {
@@ -821,7 +841,7 @@ static void process_incoming_stream(const char* data, size_t len)
             memcpy(&current_header, incoming_stream + processed, sizeof(PacketHeader));
             current_header.length = ntohl(current_header.length);
             processed += sizeof(PacketHeader);
-            
+
             if (current_header.length > 0) {
                 stream_state = STATE_BODY;
                 bytes_needed = current_header.length;
@@ -942,8 +962,6 @@ static bool has_active_transfer(void)
 }
 
 // Send chunks every frame
-// Send chunks every frame
-// Send chunks every frame
 static void pump_outgoing_transfers(ClientConnection* conn)
 {
     // Use static buffers to avoid stack overflow with large chunk sizes (e.g. 1MB)
@@ -957,7 +975,7 @@ static void pump_outgoing_transfers(ClientConnection* conn)
 
     // Throttle based on queue size (e.g., max 10MB pending)
     // This prevents memory exhaustion if disk read > network send
-    const size_t MAX_QUEUE_SIZE = 10 * 1024 * 1024; 
+    const size_t MAX_QUEUE_SIZE = 10 * 1024 * 1024;
     if (pq_get_data_size(&conn->queue) > MAX_QUEUE_SIZE) {
         return; // Wait for queue to drain
     }
@@ -973,7 +991,7 @@ static void pump_outgoing_transfers(ClientConnection* conn)
             // Format: sender|file_id|filename|total_bytes|chunk_size
             snprintf(meta, sizeof(meta), "%s|%s|%s|%zu|%zu",
                 t->sender, t->file_id, t->filename, t->total_bytes, t->chunk_size);
-            
+
             send_packet(conn, PACKET_TYPE_FILE_START, meta, (uint32_t)strlen(meta));
             t->meta_sent = true;
         }
@@ -982,7 +1000,7 @@ static void pump_outgoing_transfers(ClientConnection* conn)
         // We can send multiple chunks per frame since we are just pushing to memory now
         // But let's limit it to avoid spiking memory usage too fast in one frame
         int chunks_sent_this_frame = 0;
-        const int MAX_CHUNKS_PER_FRAME = 5; 
+        const int MAX_CHUNKS_PER_FRAME = 5;
 
         while (t->sent_bytes < t->total_bytes && chunks_sent_this_frame < MAX_CHUNKS_PER_FRAME) {
             // Check queue size again inside loop
@@ -1168,7 +1186,7 @@ static void files_displaying(Font font)
                 float x_pos = panel_view.x + 10 + panel_scroll.x;
                 float y_pos = panel_view.y + y_offset + panel_scroll.y;
 
-                float btn_x = panel_view.x + panel_view.width - 30; 
+                float btn_x = panel_view.x + panel_view.width - 30;
                 float btn_y = panel_view.y + y_offset + panel_scroll.y;
                 // float btn_y = panel_view.y + y_offset + panel_scroll.y;
                 // Delete a file button
@@ -1186,7 +1204,6 @@ static void files_displaying(Font font)
                     snprintf(display_text, sizeof(display_text), "%d. %.25s (%s)", i + 1, received_files[i].filename, size_str);
                 }
 
-
                 DrawTextEx(font, display_text, (Vector2) { x_pos, y_pos }, font_size, spacing, BLACK);
                 y_offset += line_height;
             }
@@ -1203,7 +1220,7 @@ static void files_displaying(Font font)
     GuiSetStyle(BUTTON, TEXT_COLOR_NORMAL, ColorToInt(WHITE));
     GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL, ColorToInt(MAROON));
     // 3. Draw the button
-    if (received_files_count > 0 && GuiButton((Rectangle) { WINDOW_WIDTH - panel_width, ((WINDOW_HEIGHT - panel_height) / 2.f) + 270, 120, 30}, "#9# Remove all files")) {
+    if (received_files_count > 0 && GuiButton((Rectangle) { WINDOW_WIDTH - panel_width, ((WINDOW_HEIGHT - panel_height) / 2.f) + 270, 120, 30 }, "#9# Remove all files")) {
         remove_all_files();
         scan_received_folder();
     }
@@ -1283,7 +1300,7 @@ int main()
         }
 
         // Display welcome mesasge at the center horizontally
-        welcome_msg(comic_font_bold);
+        welcome_msg(GetFontDefault());
 
         if (is_connected) {
             files_displaying(comic_font);
