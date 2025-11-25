@@ -2,7 +2,9 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#ifndef _WIN32
+    #include <unistd.h>
+#endif
 
 static volatile sig_atomic_t g_running = 1;
 

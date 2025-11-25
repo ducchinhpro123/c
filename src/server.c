@@ -1,15 +1,14 @@
 #include "platform.h"
 #include "server.h"
-#include "server.h"
 #include "file_transfer.h"
 #include <errno.h>
-#include <fcntl.h>
-#include <netinet/tcp.h>
 #include <raylib.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
+#ifndef _WIN32
+    #include <fcntl.h>
+#endif
 static int server_fd = -1;
 static Client clients[MAX_CLIENTS];
 static int client_count = 0;
@@ -78,21 +77,39 @@ int server_accept_client()
     int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
 
     if (client_fd == -1) {
+#ifdef _WIN32
+        int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK) {
+            return -1;
+        }
+        TraceLog(LOG_ERROR, "Accept failed. WSA error %d", err);
+#else
         if (errno == EWOULDBLOCK || errno == EAGAIN) {
             return -1;
         }
         TraceLog(LOG_ERROR, "Accept failed. %s", strerror(errno));
+#endif
         return -1;
     }
 
     // Optimize socket for LAN speed
+#ifdef _WIN32
+    char nodelay = 1;
+    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+    char sendbuf[4]; *(int*)sendbuf = 2 * 1024 * 1024;
+    setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, sendbuf, sizeof(sendbuf));
+    char recvbuf[4]; *(int*)recvbuf = 2 * 1024 * 1024;
+    setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, recvbuf, sizeof(recvbuf));
+    // Non-block mode
+    u_long iMode = 1;
+    ioctlsocket(client_fd, FIONBIO, &iMode);
+#else
     int nodelay = 1;
     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
     int sendbuf = 2 * 1024 * 1024;
     setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &sendbuf, sizeof(sendbuf));
     int recvbuf = 2 * 1024 * 1024;
     setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &recvbuf, sizeof(recvbuf));
-    
     // Non-block mode
     int flags = fcntl(client_fd, F_GETFL, 0);
     if (flags == -1) {
@@ -102,6 +119,7 @@ int server_accept_client()
             TraceLog(LOG_WARNING, "fcntl(F_SETFL) O_NONBLOCK failed: %s", strerror(errno));
         }
     }
+#endif
 
     if (client_count >= MAX_CLIENTS) {
         TraceLog(LOG_WARNING, "Max clients reached, rejecting");
@@ -161,18 +179,21 @@ bool init_server()
         TraceLog(LOG_ERROR, "Socket creation failed.");
         return false;
     }
+#ifdef _WIN32
+    char opt = 1;
+#else
     int opt = 1;
+#endif
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof opt);
 
     struct sockaddr_in addr = { 0 };
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY; // Accept connection on any interface
-    addr.sin_port = htons(PORT); // Convert to network byte order, listen on port PORT
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(PORT);
 
     if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
         perror("bind");
         TraceLog(LOG_ERROR, "Bind failed: %s", strerror(errno));
-        // close(server_fd);
         closesocket(server_fd);
         return false;
     }
@@ -183,8 +204,13 @@ bool init_server()
         return false;
     }
 
-    int flags = fcntl(server_fd, F_GETFL, 0); // Current status of the socket
-    fcntl(server_fd, F_SETFL, flags | O_NONBLOCK); // Modifty it
+#ifdef _WIN32
+    u_long iMode = 1;
+    ioctlsocket(server_fd, FIONBIO, &iMode);
+#else
+    int flags = fcntl(server_fd, F_GETFL, 0);
+    fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
+#endif
 
     server_running = true;
     TraceLog(LOG_INFO, "Server is running on port %d, ready to accept connections", PORT);
@@ -261,9 +287,16 @@ void server_recv_msgs()
                 server_broadcast_msg(leave_msg, -1);
             }
         } else {
+#ifdef _WIN32
+            int err = WSAGetLastError();
+            if (err == WSAEWOULDBLOCK)
+                continue;
+            TraceLog(LOG_WARNING, "Recv failed for %s: WSA error %d", clients[i].ip_addr, err);
+#else
             if (errno == EWOULDBLOCK || errno == EAGAIN)
                 continue;
             TraceLog(LOG_WARNING, "Recv failed for %s: %s", clients[i].ip_addr, strerror(errno));
+#endif
             remove_client(i);
             i--;
         }
@@ -357,10 +390,18 @@ static ssize_t send_all_to_client(int socket_fd, const char* data, size_t len)
     if (len > 1000000) base_wait_ms = 100; // 100ms for >1MB
     
     while (total_sent < len) {
+#ifdef _WIN32
+        ssize_t bytes_sent = send(socket_fd, data + total_sent, (int)(len - total_sent), 0);
+#else
         ssize_t bytes_sent = send(socket_fd, data + total_sent, len - total_sent, MSG_NOSIGNAL);
-        
+#endif
         if (bytes_sent < 0) {
+#ifdef _WIN32
+            int err = WSAGetLastError();
+            if (err == WSAEWOULDBLOCK) {
+#else
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
+#endif
                 // Socket buffer full, wait and retry
                 retry_count++;
                 if (retry_count > MAX_RETRIES) {
@@ -391,15 +432,24 @@ static ssize_t send_all_to_client(int socket_fd, const char* data, size_t len)
                 
                 usleep(wait_ms * 1000);
                 continue;
-            } else if (errno == EPIPE || errno == ECONNRESET) {
-                // Connection closed
+            }
+#ifdef _WIN32
+            else if (err == WSAECONNRESET || err == WSAECONNABORTED) {
                 TraceLog(LOG_WARNING, "Connection closed while sending after %zu/%zu bytes", total_sent, len);
                 return -1;
             } else {
-                // Other error
+                TraceLog(LOG_ERROR, "Send error: %d (sent %zu/%zu bytes)", err, total_sent, len);
+                return -1;
+            }
+#else
+            else if (errno == EPIPE || errno == ECONNRESET) {
+                TraceLog(LOG_WARNING, "Connection closed while sending after %zu/%zu bytes", total_sent, len);
+                return -1;
+            } else {
                 TraceLog(LOG_ERROR, "Send error: %s (sent %zu/%zu bytes)", strerror(errno), total_sent, len);
                 return -1;
             }
+#endif
         } else if (bytes_sent == 0) {
             // This shouldn't happen with blocking send, but handle it
             retry_count++;

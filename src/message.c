@@ -1,38 +1,6 @@
-#include "platform.h"
 #include "message.h"
 #include <string.h>
 #include <time.h>
-#ifdef _WIN32
-    #include <windows.h>
-    // Define macros to map pthread functions to Windows critical sections
-    // The mutex type is defined in message.h as a struct that contains space for CRITICAL_SECTION
-
-    static inline int pthread_mutex_init(pthread_mutex_t* mutex, void* attr __attribute__((unused))) {
-        CRITICAL_SECTION* cs = (CRITICAL_SECTION*)mutex;
-        InitializeCriticalSection(cs);
-        return 0;
-    }
-
-    static inline int pthread_mutex_lock(pthread_mutex_t* mutex) {
-        CRITICAL_SECTION* cs = (CRITICAL_SECTION*)mutex;
-        EnterCriticalSection(cs);
-        return 0;
-    }
-
-    static inline int pthread_mutex_unlock(pthread_mutex_t* mutex) {
-        CRITICAL_SECTION* cs = (CRITICAL_SECTION*)mutex;
-        LeaveCriticalSection(cs);
-        return 0;
-    }
-
-    static inline int pthread_mutex_destroy(pthread_mutex_t* mutex) {
-        CRITICAL_SECTION* cs = (CRITICAL_SECTION*)mutex;
-        DeleteCriticalSection(cs);
-        return 0;
-    }
-#else
-    #include <pthread.h>
-#endif
 
 void init_message_queue(MessageQueue* q)
 {

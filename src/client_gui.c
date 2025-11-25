@@ -1,24 +1,26 @@
+// platform.h MUST be first to define NOGDI/NOUSER before any Windows headers
+#include "platform.h"
+
+#include <raylib.h>
+
 #include "client_network.h"
 #include "file_transfer.h"
 #include "message.h"
 #include "packet_queue.h"
-#include "platform.h"
 #include "warning_dialog.h"
 #include "window.h"
-#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
-#include <io.h>
-#include <sys/stat.h>
+    #include <io.h>
+    #include <sys/stat.h>
 #else
-#include <sys/stat.h>
-#include <unistd.h>
+    #include <dirent.h>
+    #include <sys/stat.h>
+    #include <unistd.h>
 #endif
-
-#include <raylib.h>
 #define RAYGUI_IMPLEMENTATION
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
@@ -105,47 +107,57 @@ static void remove_selected_file(const char* filepath);
 
 static void remove_selected_file(const char* filepath)
 {
-    DIR* dir = opendir("received");
-    if (dir == NULL) {
-        TraceLog(LOG_ERROR, "Failed to open 'received' folder to delete files: %s", strerror(errno));
-        return;
-    }
     char full_filepath[512];
     snprintf(full_filepath, sizeof(full_filepath), "received/%s", filepath);
     if (remove(full_filepath) == 0) {
         TraceLog(LOG_INFO, "Deleted file: %s", full_filepath);
         scan_received_folder();
-        received_files_count -= 1;
     } else {
         TraceLog(LOG_WARNING, "Failed to delete file %s: %s", full_filepath, strerror(errno));
     }
-
-    closedir(dir);
 }
 
 static void remove_all_files(void)
 {
+#ifdef _WIN32
+    WIN32_FIND_DATAA ffd;
+    HANDLE hFind = FindFirstFileA("received\\*", &ffd);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        TraceLog(LOG_ERROR, "Failed to open 'received' folder");
+        return;
+    }
+    char filepath[512];
+    do {
+        if (strcmp(ffd.cFileName, ".") == 0 || strcmp(ffd.cFileName, "..") == 0)
+            continue;
+        snprintf(filepath, sizeof(filepath), "received\\%s", ffd.cFileName);
+        if (DeleteFileA(filepath)) {
+            TraceLog(LOG_INFO, "Deleted file: %s", filepath);
+        } else {
+            TraceLog(LOG_WARNING, "Failed to delete file %s", filepath);
+        }
+    } while (FindNextFileA(hFind, &ffd));
+    FindClose(hFind);
+#else
     DIR* dir = opendir("received");
     if (dir == NULL) {
-        TraceLog(LOG_ERROR, "Failed to open 'received' folder to delete files: %s", strerror(errno));
+        TraceLog(LOG_ERROR, "Failed to open 'received' folder: %s", strerror(errno));
         return;
     }
     struct dirent* entry;
     char filepath[512];
     while ((entry = readdir(dir)) != NULL) {
-        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
             continue;
-        }
-
         snprintf(filepath, sizeof(filepath), "received/%s", entry->d_name);
-        if (!remove(filepath)) {
+        if (remove(filepath) == 0) {
             TraceLog(LOG_INFO, "Deleted file: %s", filepath);
         } else {
             TraceLog(LOG_WARNING, "Failed to delete file %s: %s", filepath, strerror(errno));
         }
     }
-
     closedir(dir);
+#endif
     received_files_count = 0;
 }
 
@@ -1104,29 +1116,49 @@ static void abort_all_transfers(void)
 static void scan_received_folder(void)
 {
     received_files_count = 0;
+#ifdef _WIN32
+    WIN32_FIND_DATAA ffd;
+    HANDLE hFind = FindFirstFileA("received\\*", &ffd);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        TraceLog(LOG_ERROR, "Failed to open 'received' folder");
+        return;
+    }
+    do {
+        if (strcmp(ffd.cFileName, ".") == 0 || strcmp(ffd.cFileName, "..") == 0)
+            continue;
+        if (!(ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && received_files_count < 100) {
+            strncpy(received_files[received_files_count].filename, ffd.cFileName,
+                    sizeof(received_files[received_files_count].filename) - 1);
+            LARGE_INTEGER filesize;
+            filesize.LowPart = ffd.nFileSizeLow;
+            filesize.HighPart = ffd.nFileSizeHigh;
+            received_files[received_files_count].size = (long)filesize.QuadPart;
+            received_files_count++;
+        }
+    } while (FindNextFileA(hFind, &ffd));
+    FindClose(hFind);
+#else
     DIR* dir = opendir("received");
     if (!dir) {
         TraceLog(LOG_ERROR, "Failed to open 'received' folder: %s", strerror(errno));
         return;
     }
-
     struct dirent* entry;
     while ((entry = readdir(dir)) != NULL && received_files_count < 100) {
-        // Skip "." and ".." directories
-        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
             continue;
-
         char filepath[512];
         snprintf(filepath, sizeof(filepath), "received/%s", entry->d_name);
-
         struct stat st;
         if (stat(filepath, &st) == 0 && S_ISREG(st.st_mode)) {
-            strncpy(received_files[received_files_count].filename, entry->d_name, sizeof(received_files[received_files_count].filename) - 1);
+            strncpy(received_files[received_files_count].filename, entry->d_name,
+                    sizeof(received_files[received_files_count].filename) - 1);
             received_files[received_files_count].size = st.st_size;
             received_files_count++;
         }
     }
     closedir(dir);
+#endif
 }
 
 static char* format_file_size(long file_size)

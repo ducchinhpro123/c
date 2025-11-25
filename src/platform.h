@@ -6,9 +6,14 @@
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
-    // Define specific macros to avoid conflicts with raylib BEFORE including any Windows headers
-    #define NOGDI  // Exclude GDI functions that conflict with raylib types
-    #define NOUSER  // Exclude user functions that conflict with raylib (CloseWindow, ShowCursor, etc.)
+    
+    // IMPORTANT: These must be defined BEFORE including any Windows headers
+    // to prevent conflicts with raylib types (Rectangle, CloseWindow, ShowCursor, etc.)
+    #define NOGDI
+    #define NOUSER
+    #define NOMCX
+    #define NOIME
+    
     // Include winsock2.h BEFORE windows.h to avoid conflicts
     #include <winsock2.h>
     #include <ws2tcpip.h>

@@ -1,11 +1,12 @@
 #ifndef CLIENT_NETWORK_H
 #define CLIENT_NETWORK_H
 
-// #include "platform.h"
+#include "platform.h"
 #include <stdbool.h>
-#include <sys/types.h>
-
 #include <stdint.h>
+#ifndef _WIN32
+    #include <sys/types.h>
+#endif
 
 // Packet Types
 #define PACKET_TYPE_TEXT       0

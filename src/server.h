@@ -1,16 +1,12 @@
 #ifndef SERVER_H
 #define SERVER_H
 
-#include <arpa/inet.h> // inet_addr()
+#include "platform.h"
 #include <errno.h>
-#include <fcntl.h>
-#include <netinet/in.h> // sockaddr_in
 #include <raylib.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/socket.h> // socket()
-#include <unistd.h> // close()
 #include <stdint.h>
 
 // Packet Types

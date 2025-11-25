@@ -273,12 +273,18 @@ int recv_msg(ClientConnection* conn, char* buffer, int size)
 {
     ssize_t bytes_recv = recv(conn->socket_fd, buffer, size, 0);
     if (bytes_recv < 0) {
-        // No data yet, keep the connection open
+#ifdef _WIN32
+        int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK) {
+            return 0;
+        }
+        TraceLog(LOG_ERROR, "Recv failed: WSA error %d", err);
+#else
         if (errno == EWOULDBLOCK || errno == EAGAIN) {
             return 0;
         }
-
         TraceLog(LOG_ERROR, "Recv failed: %s", strerror(errno));
+#endif
         conn->connected = false;
         return -1;
     }
