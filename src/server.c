@@ -224,21 +224,32 @@ static void handle_client_packet(int client_index, uint8_t type, const char* dat
 void server_recv_msgs()
 {
     for (int i = 0; i < client_count; ++i) {
-        char buffer[BUFFER_SIZE];
+        char buffer[65536]; // 64KB stack buffer is safe and sufficient for TCP stream
         int fd = clients[i].sock_fd;
-        int bytes_recv = recv(fd, buffer, sizeof(buffer), 0);
+        
+        // Loop to drain socket buffer
+        while (true) {
+            char buffer[65536]; // 64KB stack buffer
+            int bytes_recv = recv(fd, buffer, sizeof(buffer), 0);
 
-        if (bytes_recv > 0) {
-            size_t available = sizeof(clients[i].recv_buffer) - clients[i].recv_len;
-            if ((size_t)bytes_recv > available) {
-                TraceLog(LOG_ERROR, "Client %s overflowed recv buffer", clients[i].ip_addr);
-                remove_client(i);
-                i--;
-                continue;
-            }
+            if (bytes_recv > 0) {
+                size_t available = sizeof(clients[i].recv_buffer) - clients[i].recv_len;
+                if ((size_t)bytes_recv > available) {
+                    TraceLog(LOG_ERROR, "Client %s overflowed recv buffer", clients[i].ip_addr);
+                    remove_client(i);
+                    i--;
+                    break; // Break inner loop, outer loop continues
+                }
 
-            memcpy(clients[i].recv_buffer + clients[i].recv_len, buffer, bytes_recv);
-            clients[i].recv_len += bytes_recv;
+                memcpy(clients[i].recv_buffer + clients[i].recv_len, buffer, bytes_recv);
+                clients[i].recv_len += bytes_recv;
+                
+                // Process data immediately to free up buffer space if possible
+                // (Existing processing logic here)
+                // Actually, we should just append to buffer and process after loop?
+                // No, if we fill up CLIENT_STREAM_BUFFER (10MB), we must process.
+                // So let's keep processing logic inside the loop.
+
 
             // Initialize state if needed (hacky but works for static array)
             if (client_states[i].bytes_needed == 0) {
@@ -275,31 +286,33 @@ void server_recv_msgs()
                 memmove(clients[i].recv_buffer, clients[i].recv_buffer + processed, remaining);
                 clients[i].recv_len = remaining;
             }
-        } else if (bytes_recv == 0) {
-            TraceLog(LOG_INFO, "Client disconnected (%s)", clients[i].ip_addr);
-            char leave_msg[512];
-            snprintf(leave_msg, sizeof(leave_msg), "SYSTEM: User %s (%s) has left",
-                clients[i].username, clients[i].ip_addr);
-            remove_client(i);
-            i--;
-            if (client_count > 0) {
-                // Broadcast leave message as text
-                server_broadcast_msg(leave_msg, -1);
-            }
-        } else {
+            } else if (bytes_recv == 0) {
+                TraceLog(LOG_INFO, "Client disconnected (%s)", clients[i].ip_addr);
+                char leave_msg[512];
+                snprintf(leave_msg, sizeof(leave_msg), "SYSTEM: User %s (%s) has left",
+                    clients[i].username, clients[i].ip_addr);
+                remove_client(i);
+                i--;
+                if (client_count > 0) {
+                    server_broadcast_msg(leave_msg, -1);
+                }
+                break; // Break inner loop
+            } else {
 #ifdef _WIN32
-            int err = WSAGetLastError();
-            if (err == WSAEWOULDBLOCK)
-                continue;
-            TraceLog(LOG_WARNING, "Recv failed for %s: WSA error %d", clients[i].ip_addr, err);
+                int err = WSAGetLastError();
+                if (err == WSAEWOULDBLOCK)
+                    break; // No more data, break inner loop
+                TraceLog(LOG_WARNING, "Recv failed for %s: WSA error %d", clients[i].ip_addr, err);
 #else
-            if (errno == EWOULDBLOCK || errno == EAGAIN)
-                continue;
-            TraceLog(LOG_WARNING, "Recv failed for %s: %s", clients[i].ip_addr, strerror(errno));
+                if (errno == EWOULDBLOCK || errno == EAGAIN)
+                    break; // No more data, break inner loop
+                TraceLog(LOG_WARNING, "Recv failed for %s: %s", clients[i].ip_addr, strerror(errno));
 #endif
-            remove_client(i);
-            i--;
-        }
+                remove_client(i);
+                i--;
+                break; // Break inner loop
+            }
+        } // End while(true)
     }
 }
 
@@ -307,8 +320,13 @@ static void handle_client_packet(int client_index, uint8_t type, const char* dat
 {
     if (type == PACKET_TYPE_TEXT) {
         // Ensure null termination
-        char msg[BUFFER_SIZE];
-        if (len >= sizeof(msg)) len = sizeof(msg) - 1;
+        char* msg = malloc(BUFFER_SIZE);
+        if (!msg) {
+            TraceLog(LOG_ERROR, "OOM in handle_client_packet");
+            return;
+        }
+        
+        if (len >= BUFFER_SIZE) len = BUFFER_SIZE - 1;
         if (len > 0) memcpy(msg, data, len);
         msg[len] = '\0';
 
@@ -331,6 +349,7 @@ static void handle_client_packet(int client_index, uint8_t type, const char* dat
         if (g_on_msg_cb) {
             g_on_msg_cb(msg, clients[client_index].username);
         }
+        free(msg);
     } else if (type >= PACKET_TYPE_FILE_START && type <= PACKET_TYPE_FILE_ABORT) {
         // Forward file packets
         // We need to update process_file_message to take raw data
@@ -465,12 +484,12 @@ static ssize_t send_all_to_client(int socket_fd, const char* data, size_t len)
         total_sent += bytes_sent;
         
         // For large transfers, yield CPU occasionally but don't reset progress
-        if (total_sent > 0 && (total_sent % 32768) == 0 && len > 10000) {
-            // Log progress for large transfers
-            TraceLog(LOG_INFO, "Transfer progress: %zu/%zu bytes (%.1f%%)",
-                     total_sent, len, (float)total_sent / len * 100);
-            usleep(1000); // Very brief yield, just 1ms
-        }
+        // if (total_sent > 0 && (total_sent % 32768) == 0 && len > 10000) {
+        //     // Log progress for large transfers
+        //     TraceLog(LOG_INFO, "Transfer progress: %zu/%zu bytes (%.1f%%)",
+        //              total_sent, len, (float)total_sent / len * 100);
+        //     usleep(1000); // Very brief yield, just 1ms
+        // }
         
         retry_count = 0; // Reset retry counter on successful send
     }
@@ -501,10 +520,13 @@ static void send_abort_to_sender(int fd, const char* file_id, const char* reason
     if (fd < 0 || !file_id || !reason)
         return;
 
-    char msg[BUFFER_SIZE];
-    snprintf(msg, sizeof(msg), "FILE_ABORT|SYSTEM|%s|%s", file_id, reason);
+    char* msg = malloc(BUFFER_SIZE);
+    if (!msg) return;
+
+    snprintf(msg, BUFFER_SIZE, "FILE_ABORT|SYSTEM|%s|%s", file_id, reason);
     send_all_to_client(fd, msg, strlen(msg));
     send_all_to_client(fd, "\n", 1);
+    free(msg);
 }
 
 static void broadcast_file_abort(const char* file_id, const char* reason, int skip_fd)
@@ -512,9 +534,12 @@ static void broadcast_file_abort(const char* file_id, const char* reason, int sk
     if (!file_id || !reason)
         return;
 
-    char msg[BUFFER_SIZE];
-    snprintf(msg, sizeof(msg), "FILE_ABORT|SYSTEM|%s|%s", file_id, reason);
+    char* msg = malloc(BUFFER_SIZE);
+    if (!msg) return;
+
+    snprintf(msg, BUFFER_SIZE, "FILE_ABORT|SYSTEM|%s|%s", file_id, reason);
     server_broadcast_msg(msg, skip_fd);
+    free(msg);
 }
 
 static FileTransferSession* file_session_find(const char* file_id)
@@ -584,8 +609,10 @@ static bool process_file_message(int client_index, uint8_t type, const char* dat
 {
     if (type == PACKET_TYPE_FILE_START) {
         // Payload: sender|file_id|filename|total_bytes|chunk_size
-        char buffer[BUFFER_SIZE];
-        if (len >= sizeof(buffer)) len = sizeof(buffer) - 1;
+        char* buffer = malloc(BUFFER_SIZE);
+        if (!buffer) return false;
+
+        if (len >= BUFFER_SIZE) len = BUFFER_SIZE - 1;
         memcpy(buffer, data, len);
         buffer[len] = '\0';
         
@@ -615,6 +642,7 @@ static bool process_file_message(int client_index, uint8_t type, const char* dat
             return false;
         }
         session->forwarded_bytes = 0;
+        free(buffer);
         return true;
     }
     else if (type == PACKET_TYPE_FILE_CHUNK) {
@@ -643,8 +671,10 @@ static bool process_file_message(int client_index, uint8_t type, const char* dat
     }
     else if (type == PACKET_TYPE_FILE_END) {
         // Payload: sender|file_id
-        char buffer[BUFFER_SIZE];
-        if (len >= sizeof(buffer)) len = sizeof(buffer) - 1;
+        char* buffer = malloc(BUFFER_SIZE);
+        if (!buffer) return false;
+
+        if (len >= BUFFER_SIZE) len = BUFFER_SIZE - 1;
         memcpy(buffer, data, len);
         buffer[len] = '\0';
         
@@ -652,28 +682,37 @@ static bool process_file_message(int client_index, uint8_t type, const char* dat
         const char* sender = strtok_r(buffer, "|", &save_ptr);
         const char* file_id = strtok_r(NULL, "|", &save_ptr);
         
-        if (!sender || !file_id) return false;
+        if (!sender || !file_id) {
+            free(buffer);
+            return false;
+        }
         
         (void)sender;
 
         FileTransferSession* session = file_session_find(file_id);
-        if (!session)
+        if (!session) {
+            free(buffer);
             return false;
+        }
 
         size_t tolerance = 2048;
         if (session->forwarded_bytes + tolerance < session->total_bytes) {
             broadcast_file_abort(file_id, "Transfer incomplete", -1);
             file_session_remove(session);
+            free(buffer);
             return false;
         }
 
         file_session_remove(session);
+        free(buffer);
         return true;
     }
     else if (type == PACKET_TYPE_FILE_ABORT) {
         // Payload: sender|file_id|reason
-        char buffer[BUFFER_SIZE];
-        if (len >= sizeof(buffer)) len = sizeof(buffer) - 1;
+        char* buffer = malloc(BUFFER_SIZE);
+        if (!buffer) return true;
+
+        if (len >= BUFFER_SIZE) len = BUFFER_SIZE - 1;
         memcpy(buffer, data, len);
         buffer[len] = '\0';
         
@@ -687,6 +726,7 @@ static bool process_file_message(int client_index, uint8_t type, const char* dat
         FileTransferSession* session = file_session_find(file_id);
         if (session)
             file_session_remove(session);
+        free(buffer);
         return true;
     }
 

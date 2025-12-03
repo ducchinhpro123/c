@@ -12,14 +12,20 @@ void pq_init(PacketQueue* pq) {
     pthread_cond_init(&pq->cond, NULL);
 }
 
-void pq_push(PacketQueue* pq, uint8_t type, const void* data, uint32_t length) {
+int pq_push(PacketQueue* pq, uint8_t type, const void* data, uint32_t length) {
     Packet* pkt = (Packet*)malloc(sizeof(Packet));
+    if (!pkt) return -1;
+
     pkt->type = type;
     pkt->length = length;
     pkt->next = NULL;
 
     if (length > 0 && data != NULL) {
         pkt->data = malloc(length);
+        if (!pkt->data) {
+            free(pkt);
+            return -1;
+        }
         memcpy(pkt->data, data, length);
     } else {
         pkt->data = NULL;
@@ -40,6 +46,7 @@ void pq_push(PacketQueue* pq, uint8_t type, const void* data, uint32_t length) {
 
     pthread_cond_signal(&pq->cond);
     pthread_mutex_unlock(&pq->mutex);
+    return 0;
 }
 
 Packet* pq_pop(PacketQueue* pq) {

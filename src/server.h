@@ -26,7 +26,7 @@ typedef struct {
 #define MAX_CLIENTS 100
 #define PORT 8898
 // #define BUFFER_SIZE 1024
-#define BUFFER_SIZE 1500000
+#define BUFFER_SIZE (5 * 1024 * 1024) // 5MB to support 4MB chunks
 #define CLIENT_STREAM_BUFFER (BUFFER_SIZE * 2)
 
 typedef void (*server_msg_cb)(const char* msg, const char* username);

@@ -4,6 +4,7 @@
 /server
 /ClientApp_Release
 /received
+/Docs
 *.log
 *.bak
 server_gui

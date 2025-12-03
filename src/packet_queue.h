@@ -22,7 +22,7 @@ typedef struct {
 } PacketQueue;
 
 void pq_init(PacketQueue* pq);
-void pq_push(PacketQueue* pq, uint8_t type, const void* data, uint32_t length);
+int pq_push(PacketQueue* pq, uint8_t type, const void* data, uint32_t length);
 Packet* pq_pop(PacketQueue* pq); // Blocking pop
 void pq_free_packet(Packet* pkt);
 size_t pq_get_data_size(PacketQueue* pq);

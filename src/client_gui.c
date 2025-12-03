@@ -40,7 +40,7 @@ static MessageQueue g_mq = { 0 }; // Init message queue
 #define MAX_ACTIVE_TRANSFERS 8
 #define MAX_CHUNKS_PER_BATCH 64
 #define TRANSFER_PUMP_BUDGET_MS 8.0f
-#define INCOMING_STREAM_CAPACITY (MSG_BUFFER * 2)
+#define INCOMING_STREAM_CAPACITY (MSG_BUFFER * 5)
 
 typedef struct {
     bool active;
@@ -412,6 +412,7 @@ void introduction_window(Font custom_font)
     center_text_horizontally("I made this application just for fun, so I hope you don't expect much from it.", 20, 230, RED, custom_font);
     center_text_horizontally("This app lets you chat with other peers in a LAN.", 20, 270, RED, custom_font);
     center_text_horizontally("There is nothing much to say; happy coding, and good luck!!!", 20, 310, RED, custom_font);
+    center_text_horizontally("Author: Vo Duc Chinh - ST22B - UDA", 30, 650, RED, custom_font);
 }
 
 void connection_screen(int* port, char* server_ip, char* port_str, char* username, bool* is_connected, ClientConnection* conn)
@@ -490,6 +491,7 @@ void connection_screen(int* port, char* server_ip, char* port_str, char* usernam
         TraceLog(LOG_INFO, "Port set to: %d", *port);
         TraceLog(LOG_INFO, "Server host set to: %s", server_ip);
     }
+
 }
 
 void debug_mq()
@@ -911,7 +913,7 @@ static void start_outgoing_transfer(ClientConnection* conn, const char* file_pat
         return;
     }
 
-    // Setup outgoing transfer
+    // Configure metadata of a file
     memset(slot, 0, sizeof(*slot));
     slot->active = true;
     slot->fp = fp;
@@ -978,8 +980,9 @@ static void pump_outgoing_transfers(ClientConnection* conn)
 {
     // Use static buffers to avoid stack overflow with large chunk sizes (e.g. 1MB)
     // Total stack usage would be > 2MB otherwise, which crashes on Windows (default 1MB stack)
-    static unsigned char chunk_buffer[FILE_CHUNK_SIZE];
-    static unsigned char payload_buffer[FILE_ID_LEN + FILE_CHUNK_SIZE];
+    // static unsigned char chunk_buffer[FILE_CHUNK_SIZE];
+    // static unsigned char payload_buffer[FILE_ID_LEN + FILE_CHUNK_SIZE];
+
     char message_buffer[MSG_BUFFER];
 
     if (!conn->connected)
@@ -990,6 +993,25 @@ static void pump_outgoing_transfers(ClientConnection* conn)
     const size_t MAX_QUEUE_SIZE = 10 * 1024 * 1024;
     if (pq_get_data_size(&conn->queue) > MAX_QUEUE_SIZE) {
         return; // Wait for queue to drain
+    }
+
+    bool any_active = false;
+    for (int i = 0; i < MAX_ACTIVE_TRANSFERS; ++i) {
+        if (outgoing_transfers[i].active) {
+            any_active = true;
+            break;
+        }
+    }
+    if (!any_active) return;
+
+    unsigned char* chunk_buffer = malloc(FILE_CHUNK_SIZE);
+    unsigned char* payload_buffer = malloc(FILE_ID_LEN + FILE_CHUNK_SIZE);
+
+    if (!chunk_buffer || !payload_buffer) {
+        TraceLog(LOG_ERROR, "Failed to allocate buffers for file transfer");
+        if (chunk_buffer) free(chunk_buffer);
+        if (payload_buffer) free(payload_buffer);
+        return;
     }
 
     for (int i = 0; i < MAX_ACTIVE_TRANSFERS; ++i) {
@@ -1012,7 +1034,7 @@ static void pump_outgoing_transfers(ClientConnection* conn)
         // We can send multiple chunks per frame since we are just pushing to memory now
         // But let's limit it to avoid spiking memory usage too fast in one frame
         int chunks_sent_this_frame = 0;
-        const int MAX_CHUNKS_PER_FRAME = 5;
+        // const int MAX_CHUNKS_PER_FRAME = 5;
 
         while (t->sent_bytes < t->total_bytes && chunks_sent_this_frame < MAX_CHUNKS_PER_FRAME) {
             // Check queue size again inside loop
@@ -1028,11 +1050,18 @@ static void pump_outgoing_transfers(ClientConnection* conn)
                 memcpy(payload_buffer, t->file_id, FILE_ID_LEN);
                 memcpy(payload_buffer + FILE_ID_LEN, chunk_buffer, read_count);
 
-                send_packet(conn, PACKET_TYPE_FILE_CHUNK, payload_buffer, (uint32_t)(FILE_ID_LEN + read_count));
-
-                t->sent_bytes += read_count;
-                t->next_chunk_index++;
-                chunks_sent_this_frame++;
+                if (send_packet(conn, PACKET_TYPE_FILE_CHUNK, payload_buffer, (uint32_t)(FILE_ID_LEN + read_count)) == 0) {
+                    t->sent_bytes += read_count;
+                    t->next_chunk_index++;
+                    chunks_sent_this_frame++;
+                } else {
+                    TraceLog(LOG_ERROR, "Failed to send file chunk");
+                    // Rewind file pointer if needed, but since we just read, we can just not increment sent_bytes
+                    // and fseek back?
+                    // Actually, we read from t->fp. We need to seek back if we want to retry.
+                    fseek(t->fp, -((long)read_count), SEEK_CUR);
+                    break; // Stop sending for this frame
+                }
             }
 
             if (read_count < to_read) {
@@ -1055,7 +1084,10 @@ static void pump_outgoing_transfers(ClientConnection* conn)
             close_outgoing_transfer(conn, t, NULL);
             scan_received_folder(); // Moved here to be inside the function and after transfer completion
         }
+
     }
+    free(chunk_buffer);
+    free(payload_buffer);
 }
 
 static void draw_transfer_status(Font custom_font)

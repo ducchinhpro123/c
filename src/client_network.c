@@ -1,6 +1,5 @@
-#include "platform.h"
 #include "client_network.h"
-#include "message.h"
+#include "platform.h"
 #include <errno.h>
 // #include <fcntl.h>
 // #include <netdb.h>
@@ -11,25 +10,25 @@
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
-    #include <io.h>
+#include <io.h>
 #else
-    #include <unistd.h>
+#include <unistd.h>
 #endif
 
 #include "packet_queue.h"
-
-
 
 // Helper function: Send all data, handling partial sends and EAGAIN
 static ssize_t send_all(int socket_fd, const char* data, size_t len);
 
 // Sender thread function
-static void* sender_thread_func(void* arg) {
+static void* sender_thread_func(void* arg)
+{
     ClientConnection* conn = (ClientConnection*)arg;
-    
+
     while (conn->connected || conn->queue.count > 0) {
         Packet* pkt = pq_pop(&conn->queue);
-        if (!pkt) continue;
+        if (!pkt)
+            continue;
 
         if (conn->connected && conn->socket_fd != -1) {
             PacketHeader header;
@@ -48,7 +47,7 @@ static void* sender_thread_func(void* arg) {
                 }
             }
         }
-        
+
         pq_free_packet(pkt);
     }
     return NULL;
@@ -63,10 +62,11 @@ void init_client_connection(ClientConnection* conn)
 }
 
 // Helper: Set socket options for high-speed LAN transfer
-static void optimize_socket_for_lan(int socket_fd) {
+static void optimize_socket_for_lan(int socket_fd)
+{
     // Disable Nagle's algorithm for immediate sending
 #ifdef _WIN32
-    char flag = 1;  // Windows uses char* instead of int*
+    char flag = 1; // Windows uses char* instead of int*
     if (setsockopt(socket_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
 #else
     int flag = 1;
@@ -75,31 +75,27 @@ static void optimize_socket_for_lan(int socket_fd) {
         TraceLog(LOG_WARNING, "Failed to set TCP_NODELAY");
     }
 
-    // Increase send buffer to 2MB for bulk transfers
 #ifdef _WIN32
-    char sendbuf[4];
-    *(int*)sendbuf = 2 * 1024 * 1024;
-    if (setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, sendbuf, sizeof(sendbuf)) < 0) {
+    int sendbuf_size = 8 * 1024 * 1024;
+    if (setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, (char*)&sendbuf_size, sizeof(sendbuf_size)) < 0) {
 #else
-    int sendbuf = 2 * 1024 * 1024;
-    if (setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, &sendbuf, sizeof(sendbuf)) < 0) {
+    int sendbuf_size = 8 * 1024 * 1024;
+    if (setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, &sendbuf_size, sizeof(sendbuf_size)) < 0) {
 #endif
         TraceLog(LOG_WARNING, "Failed to set SO_SNDBUF");
     }
 
-    // Increase receive buffer to 2MB
 #ifdef _WIN32
-    char recvbuf[4];
-    *(int*)recvbuf = 2 * 1024 * 1024;
-    if (setsockopt(socket_fd, SOL_SOCKET, SO_RCVBUF, recvbuf, sizeof(recvbuf)) < 0) {
+    int recvbuf_size = 8 * 1024 * 1024;
+    if (setsockopt(socket_fd, SOL_SOCKET, SO_RCVBUF, (char*)&recvbuf_size, sizeof(recvbuf_size)) < 0) {
 #else
-    int recvbuf = 2 * 1024 * 1024;
-    if (setsockopt(socket_fd, SOL_SOCKET, SO_RCVBUF, &recvbuf, sizeof(recvbuf)) < 0) {
+    int recvbuf_size = 8 * 1024 * 1024;
+    if (setsockopt(socket_fd, SOL_SOCKET, SO_RCVBUF, &recvbuf_size, sizeof(recvbuf_size)) < 0) {
 #endif
         TraceLog(LOG_WARNING, "Failed to set SO_RCVBUF");
     }
 
-    TraceLog(LOG_INFO, "Socket optimized for LAN: TCP_NODELAY, 2MB buffers");
+    TraceLog(LOG_INFO, "Socket optimized for LAN: TCP_NODELAY, 8MB buffers");
 }
 
 int connect_to_server(ClientConnection* conn, const char* host, const char* port, const char* username)
@@ -242,9 +238,9 @@ static ssize_t send_all(int socket_fd, const char* data, size_t len)
 
         total_sent += (size_t)bytes_sent;
 
-        if (len > 65536 && (total_sent % 65536) == 0) {
-            TraceLog(LOG_DEBUG, "send_all progress: %zu/%zu bytes", total_sent, len);
-        }
+        // if (len > 65536 && (total_sent % 65536) == 0) {
+        //     TraceLog(LOG_DEBUG, "send_all progress: %zu/%zu bytes", total_sent, len);
+        // }
 
         retry_count = 0;
     }
@@ -259,7 +255,10 @@ int send_packet(ClientConnection* conn, uint8_t type, const void* data, uint32_t
         return -1;
     }
 
-    pq_push(&conn->queue, type, data, length);
+    if (pq_push(&conn->queue, type, data, length) != 0) {
+        TraceLog(LOG_ERROR, "Failed to push packet to queue (memory full?)");
+        return -1;
+    }
     return 0;
 }
 
