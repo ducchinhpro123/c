@@ -15,6 +15,7 @@
 #include <string.h>
 #ifdef _WIN32
     #include <io.h>
+    #include <direct.h>
     #include <sys/stat.h>
 #else
     #include <dirent.h>
@@ -36,6 +37,9 @@ Message messages[MAX_MESSAGES];
 static bool edit_mode = false;
 static char text_buffer[MSG_BUFFER] = "";
 static MessageQueue g_mq = { 0 }; // Init message queue
+
+// Buffers that must not live on the small Windows thread stack
+static char g_message_recv[MSG_BUFFER];
 
 #define MAX_ACTIVE_TRANSFERS 8
 #define MAX_CHUNKS_PER_BATCH 64
@@ -230,9 +234,12 @@ static void text_input(ClientConnection* conn, const char* username)
     }
 
     if (was_sent && strlen(text_buffer) > 0) {
-        char tmp[MSG_BUFFER];
-        strncpy(tmp, text_buffer, MSG_BUFFER);
-        tmp[MSG_BUFFER - 1] = '\0';
+        size_t raw_len = strnlen(text_buffer, MSG_BUFFER - 1);
+        char* tmp = (char*)malloc(raw_len + 1);
+        if (!tmp)
+            return;
+        memcpy(tmp, text_buffer, raw_len);
+        tmp[raw_len] = '\0';
         // simple trim message
         char *s = tmp, *e = tmp + strlen(tmp);
         while (*s && (*s == ' ' || *s == '\t' || *s == '\r'))
@@ -241,8 +248,13 @@ static void text_input(ClientConnection* conn, const char* username)
             *--e = '\0';
 
         if (*s) {
-            char formatted_msg[MSG_BUFFER + 4];
-            snprintf(formatted_msg, sizeof(formatted_msg), "%s: %s", username, s);
+            size_t fmt_len = strlen(username) + strlen(s) + 3; // "u: m" + null
+            char* formatted_msg = (char*)malloc(fmt_len);
+            if (!formatted_msg) {
+                free(tmp);
+                return;
+            }
+            snprintf(formatted_msg, fmt_len, "%s: %s", username, s);
             int bytes_sent = send_msg(conn, formatted_msg);
             if (bytes_sent == 0) {
                 add_message(&g_mq, "me", s);
@@ -252,10 +264,12 @@ static void text_input(ClientConnection* conn, const char* username)
                 TraceLog(LOG_INFO, "Sent: %s", formatted_msg);
                 should_scroll_to_bottom = true;
             }
+            free(formatted_msg);
         } else {
             was_sent = false;
             show_error("error sending message");
         }
+        free(tmp);
     }
 }
 
@@ -409,8 +423,8 @@ void introduction_window(Font custom_font)
 {
     center_text_horizontally("Overview of this application!", 50, 100, RED, custom_font);
     center_text_horizontally("Hi, thank you for using this application. You are a peer in a LAN", 20, 150, RED, custom_font);
-    center_text_horizontally("I made this application just for fun, so I hope you don't expect much from it.", 20, 230, RED, custom_font);
-    center_text_horizontally("This app lets you chat with other peers in a LAN.", 20, 270, RED, custom_font);
+    // center_text_horizontally("I made this application just for fun, so I hope you don't expect much from it.", 20, 230, RED, custom_font);
+    center_text_horizontally("This app lets you chat along with sharing files with other peers in a LAN.", 20, 270, RED, custom_font);
     center_text_horizontally("There is nothing much to say; happy coding, and good luck!!!", 20, 310, RED, custom_font);
     center_text_horizontally("Author: Vo Duc Chinh - ST22B - UDA", 30, 650, RED, custom_font);
 }
@@ -546,9 +560,13 @@ static void close_outgoing_transfer(ClientConnection* conn, OutgoingTransfer* tr
 
     if (error_msg && *error_msg) {
         if (conn && transfer->file_id[0] != '\0') {
-            char abort_msg[MSG_BUFFER];
-            snprintf(abort_msg, sizeof(abort_msg), "FILE_ABORT|%s|%s|%s", transfer->sender, transfer->file_id, error_msg);
-            send_msg(conn, abort_msg);
+            size_t abort_len = strlen("FILE_ABORT|||") + strlen(transfer->sender) + strlen(transfer->file_id) + strlen(error_msg) + 1;
+            char* abort_msg = (char*)malloc(abort_len);
+            if (abort_msg) {
+                snprintf(abort_msg, abort_len, "FILE_ABORT|%s|%s|%s", transfer->sender, transfer->file_id, error_msg);
+                send_msg(conn, abort_msg);
+                free(abort_msg);
+            }
         }
         char buf[512];
         snprintf(buf, sizeof(buf), "SYSTEM: File transfer error for %s (%s)", filename_copy[0] ? filename_copy : "file", error_msg);
@@ -608,9 +626,14 @@ static void parse_and_add_chat_message(const char* incoming)
     if (!incoming || *incoming == '\0')
         return;
 
-    char buffer[MSG_BUFFER];
-    strncpy(buffer, incoming, sizeof(buffer) - 1);
-    buffer[sizeof(buffer) - 1] = '\0';
+    // Avoid putting a 1.5MB buffer on the stack; allocate just what we need.
+    size_t len = strnlen(incoming, MSG_BUFFER - 1);
+    char* buffer = (char*)malloc(len + 1);
+    if (!buffer)
+        return;
+
+    memcpy(buffer, incoming, len);
+    buffer[len] = '\0';
 
     char* colon = strchr(buffer, ':');
     if (colon && colon > buffer) {
@@ -630,6 +653,8 @@ static void parse_and_add_chat_message(const char* incoming)
     } else {
         add_message(&g_mq, "SYSTEM", buffer);
     }
+
+    free(buffer);
 }
 
 static void handle_text_payload(char* message)
@@ -646,6 +671,25 @@ static void ensure_receive_directory(void)
 #else
         mkdir("received", 0755); // Linux: with permissions
 #endif
+    }
+}
+
+// Ensure the working directory points to the project root so relative assets resolve
+static void ensure_asset_workdir(void)
+{
+    // Fast path: resources already reachable
+    if (FileExists("resources/fonts/ComicMono.ttf"))
+        return;
+
+    // If launched from build/ (common when double-clicking on Windows), step up one level
+    #ifdef _WIN32
+        _chdir("..");
+    #else
+        chdir("..");
+    #endif
+
+    if (!FileExists("resources/fonts/ComicMono.ttf")) {
+        TraceLog(LOG_ERROR, "Asset directory not found: expected resources/fonts near executable");
     }
 }
 
@@ -821,11 +865,14 @@ static void handle_packet(uint8_t type, const char* data, size_t len)
         // Ensure null termination for text
         if (len >= MSG_BUFFER)
             len = MSG_BUFFER - 1;
-        char buffer[MSG_BUFFER];
+        char* buffer = (char*)malloc(len + 1);
+        if (!buffer)
+            return;
         if (len > 0)
             memcpy(buffer, data, len);
         buffer[len] = '\0';
         handle_text_payload(buffer);
+        free(buffer);
     } else if (type >= PACKET_TYPE_FILE_START && type <= PACKET_TYPE_FILE_ABORT) {
         handle_file_packet(type, data, len);
     } else {
@@ -983,7 +1030,8 @@ static void pump_outgoing_transfers(ClientConnection* conn)
     // static unsigned char chunk_buffer[FILE_CHUNK_SIZE];
     // static unsigned char payload_buffer[FILE_ID_LEN + FILE_CHUNK_SIZE];
 
-    char message_buffer[MSG_BUFFER];
+    // Small buffer: sender (256) + file_id (32) + delimiters
+    char message_buffer[256 + FILE_ID_LEN + 8];
 
     if (!conn->connected)
         return;
@@ -1301,6 +1349,8 @@ int main()
         return 1;
     }
 
+    ensure_asset_workdir();
+
     const char* window_title = "C&F";
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, window_title);
     SetTargetFPS(FPS);
@@ -1313,8 +1363,6 @@ int main()
     char username[USERNAME_BUFFER];
     memset(username, 0, sizeof(username));
 
-    char message_recv[MSG_BUFFER];
-
     bool is_connected = false;
     bool debugging = false;
 
@@ -1324,6 +1372,8 @@ int main()
 
     init_message_queue(&g_mq);
 
+    // Ensure received/ exists relative to the resolved working directory
+    ensure_receive_directory();
     scan_received_folder();
 
     while (!WindowShouldClose()) {
@@ -1349,9 +1399,9 @@ int main()
             /*-------------------------- RECEIVE --------------------------*/
             int recv_status;
             do {
-                recv_status = recv_msg(&conn, message_recv, MSG_BUFFER - 1);
+                recv_status = recv_msg(&conn, g_message_recv, MSG_BUFFER - 1);
                 if (recv_status > 0) {
-                    process_incoming_stream(message_recv, (size_t)recv_status);
+                    process_incoming_stream(g_message_recv, (size_t)recv_status);
                 }
             } while (recv_status > 0);
 
