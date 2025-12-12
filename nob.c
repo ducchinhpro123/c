@@ -1,5 +1,11 @@
 #define NOB_IMPLEMENTATION
 #include "./thirdparty/nob.h"
+#include <string.h>
+
+static bool nob_cstr_eq(const char *a, const char *b)
+{
+    return a && b && strcmp(a, b) == 0;
+}
 
 int main(int argc, char **argv)
 {
@@ -7,65 +13,115 @@ int main(int argc, char **argv)
 
     if (!nob_mkdir_if_not_exists("build")) return 1;
 
+    bool target_windows = false;
+#ifdef _WIN32
+    target_windows = true;
+#else
+    if (argc >= 2 && (nob_cstr_eq(argv[1], "win") || nob_cstr_eq(argv[1], "windows"))) {
+        target_windows = true;
+    }
+#endif
+
+    const char *cc = target_windows ? "x86_64-w64-mingw32-gcc" : "gcc";
+    const char *raylib_include = target_windows
+        ? "./thirdparty/raylib-windows/include"
+        : "./thirdparty/raylib-5.5_linux_amd64/include";
+    const char *raylib_lib = target_windows
+        ? "./thirdparty/raylib-windows/lib"
+        : "./thirdparty/raylib-5.5_linux_amd64/lib";
+
     Nob_Cmd cmd = {0};
 
-#ifdef _WIN32
-    // --- Windows Build ---
-    
-    // Build client_gui
-    nob_log(NOB_INFO, "Building client_gui (Windows)...");
-    cmd.count = 0;
-    nob_cmd_append(&cmd, "gcc");
-    nob_cmd_append(&cmd, "-Wall", "-Wextra", "-I./src");
-    nob_cmd_append(&cmd, "-I./thirdparty/raylib-windows/include");
-    nob_cmd_append(&cmd, "-o", "build/client_gui.exe");
-    nob_cmd_append(&cmd, "src/client_gui.c", "src/warning_dialog.c", "src/client_network.c", "src/message.c", "src/file_transfer.c", "src/packet_queue.c");
-    nob_cmd_append(&cmd, "-L./thirdparty/raylib-windows/lib");
-    nob_cmd_append(&cmd, "-lraylib", "-lws2_32", "-lgdi32", "-lwinmm", "-lpthread");
-    if (!nob_cmd_run_sync(cmd)) return 1;
+    if (target_windows) {
+        // --- Windows Build ---
 
-    // Build server
-    nob_log(NOB_INFO, "Building server (Windows)...");
-    cmd.count = 0;
-    nob_cmd_append(&cmd, "gcc");
-    nob_cmd_append(&cmd, "-Wall", "-Wextra", "-I./src");
-    nob_cmd_append(&cmd, "-I./thirdparty/raylib-windows/include");
-    nob_cmd_append(&cmd, "-o", "build/server.exe");
-    nob_cmd_append(&cmd, "src/server.c", "src/server_cli.c", "src/message.c", "src/file_transfer.c", "src/packet_queue.c");
-    nob_cmd_append(&cmd, "-L./thirdparty/raylib-windows/lib");
-    nob_cmd_append(&cmd, "-lraylib", "-lws2_32", "-lgdi32", "-lwinmm", "-lpthread");
-    if (!nob_cmd_run_sync(cmd)) return 1;
+        nob_log(NOB_INFO, "Building client_gui (Windows)...");
+        cmd.count = 0;
+        nob_cmd_append(&cmd, cc);
+        nob_cmd_append(&cmd, "-Wall", "-Wextra", "-I./src");
+        nob_cmd_append(&cmd, "-I", raylib_include);
+        nob_cmd_append(&cmd, "-o", "build/client_gui.exe");
+        nob_cmd_append(&cmd,
+            "src/client_gui.c",
+            "src/warning_dialog.c",
+            "src/client_network.c",
+            "src/message.c",
+            "src/file_transfer.c",
+            "src/packet_queue.c");
+        nob_cmd_append(&cmd, "-L", raylib_lib);
+        nob_cmd_append(&cmd,
+            "-lraylib",
+            "-lopengl32",
+            "-lgdi32",
+            "-lwinmm",
+            "-lws2_32",
+            "-lpthread");
+        if (!nob_cmd_run_sync(cmd)) return 1;
 
-#else
-    // --- Linux Build ---
-    
-    // Build client_gui
-    nob_log(NOB_INFO, "Building client_gui (Linux)...");
-    cmd.count = 0;
-    nob_cmd_append(&cmd, "gcc");
-    nob_cmd_append(&cmd, "-Wall", "-Wextra", "-I./src");
-    nob_cmd_append(&cmd, "-I./thirdparty/raylib-5.5_linux_amd64/include");
-    nob_cmd_append(&cmd, "-o", "build/client_gui");
-    nob_cmd_append(&cmd, "src/client_gui.c", "src/warning_dialog.c", "src/client_network.c", "src/message.c", "src/file_transfer.c", "src/packet_queue.c");
-    nob_cmd_append(&cmd, "-L./thirdparty/raylib-5.5_linux_amd64/lib");
-    nob_cmd_append(&cmd, "-Wl,-rpath,$ORIGIN/../thirdparty/raylib-5.5_linux_amd64/lib");
-    nob_cmd_append(&cmd, "-lraylib", "-lpthread", "-ldl", "-lrt", "-lX11", "-lm");
-    if (!nob_cmd_run_sync(cmd)) return 1;
+        nob_log(NOB_INFO, "Building server (Windows)...");
+        cmd.count = 0;
+        nob_cmd_append(&cmd, cc);
+        nob_cmd_append(&cmd, "-Wall", "-Wextra", "-I./src");
+        nob_cmd_append(&cmd, "-I", raylib_include);
+        nob_cmd_append(&cmd, "-o", "build/server.exe");
+        nob_cmd_append(&cmd,
+            "src/server.c",
+            "src/server_cli.c",
+            "src/message.c",
+            "src/file_transfer.c",
+            "src/packet_queue.c");
+        nob_cmd_append(&cmd, "-L", raylib_lib);
+        nob_cmd_append(&cmd,
+            "-lraylib",
+            "-lopengl32",
+            "-lgdi32",
+            "-lwinmm",
+            "-lws2_32",
+            "-lpthread");
+        if (!nob_cmd_run_sync(cmd)) return 1;
 
-    // Build server
-    nob_log(NOB_INFO, "Building server (Linux)...");
-    cmd.count = 0;
-    nob_cmd_append(&cmd, "gcc");
-    nob_cmd_append(&cmd, "-Wall", "-Wextra", "-I./src");
-    nob_cmd_append(&cmd, "-I./thirdparty/raylib-5.5_linux_amd64/include");
-    nob_cmd_append(&cmd, "-o", "build/server");
-    nob_cmd_append(&cmd, "src/server.c", "src/server_cli.c", "src/message.c", "src/file_transfer.c", "src/packet_queue.c");
-    nob_cmd_append(&cmd, "-L./thirdparty/raylib-5.5_linux_amd64/lib");
-    nob_cmd_append(&cmd, "-Wl,-rpath,$ORIGIN/../thirdparty/raylib-5.5_linux_amd64/lib");
-    nob_cmd_append(&cmd, "-lraylib", "-lpthread", "-ldl", "-lrt", "-lX11", "-lm");
-    if (!nob_cmd_run_sync(cmd)) return 1;
+        // Convenience: keep raylib.dll next to the exe for running on Windows
+        if (!nob_copy_file("thirdparty/raylib-windows/lib/raylib.dll", "build/raylib.dll")) {
+            nob_log(NOB_WARNING, "Could not copy raylib.dll to build/ (Windows runtime may need it next to the exe)");
+        }
+    } else {
+        // --- Linux Build ---
 
-#endif
+        nob_log(NOB_INFO, "Building client_gui (Linux)...");
+        cmd.count = 0;
+        nob_cmd_append(&cmd, cc);
+        nob_cmd_append(&cmd, "-Wall", "-Wextra", "-I./src");
+        nob_cmd_append(&cmd, "-I", raylib_include);
+        nob_cmd_append(&cmd, "-o", "build/client_gui");
+        nob_cmd_append(&cmd,
+            "src/client_gui.c",
+            "src/warning_dialog.c",
+            "src/client_network.c",
+            "src/message.c",
+            "src/file_transfer.c",
+            "src/packet_queue.c");
+        nob_cmd_append(&cmd, "-L", raylib_lib);
+        nob_cmd_append(&cmd, "-Wl,-rpath,$ORIGIN/../thirdparty/raylib-5.5_linux_amd64/lib");
+        nob_cmd_append(&cmd, "-lraylib", "-lpthread", "-ldl", "-lrt", "-lX11", "-lm");
+        if (!nob_cmd_run_sync(cmd)) return 1;
+
+        nob_log(NOB_INFO, "Building server (Linux)...");
+        cmd.count = 0;
+        nob_cmd_append(&cmd, cc);
+        nob_cmd_append(&cmd, "-Wall", "-Wextra", "-I./src");
+        nob_cmd_append(&cmd, "-I", raylib_include);
+        nob_cmd_append(&cmd, "-o", "build/server");
+        nob_cmd_append(&cmd,
+            "src/server.c",
+            "src/server_cli.c",
+            "src/message.c",
+            "src/file_transfer.c",
+            "src/packet_queue.c");
+        nob_cmd_append(&cmd, "-L", raylib_lib);
+        nob_cmd_append(&cmd, "-Wl,-rpath,$ORIGIN/../thirdparty/raylib-5.5_linux_amd64/lib");
+        nob_cmd_append(&cmd, "-lraylib", "-lpthread", "-ldl", "-lrt", "-lX11", "-lm");
+        if (!nob_cmd_run_sync(cmd)) return 1;
+    }
 
     nob_cmd_free(cmd);
     return 0;
