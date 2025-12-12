@@ -1116,6 +1116,7 @@ static void pump_outgoing_transfers(ClientConnection* conn)
             size_t remaining = t->total_bytes - t->sent_bytes;
             size_t to_read = (remaining > t->chunk_size) ? t->chunk_size : remaining;
 
+            // Read from t->fp to chunk_buffer each with to_read size
             size_t read_count = fread(chunk_buffer, 1, to_read, t->fp);
             if (read_count > 0) {
                 // Construct payload: [FileID][Data]
