@@ -96,9 +96,9 @@ int server_accept_client()
 #ifdef _WIN32
     char nodelay = 1;
     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
-    char sendbuf[4]; *(int*)sendbuf = 2 * 1024 * 1024;
+    char sendbuf[4]; *(int*)sendbuf = 8 * 1024 * 1024;
     setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, sendbuf, sizeof(sendbuf));
-    char recvbuf[4]; *(int*)recvbuf = 2 * 1024 * 1024;
+    char recvbuf[4]; *(int*)recvbuf = 8 * 1024 * 1024;
     setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, recvbuf, sizeof(recvbuf));
     // Non-block mode
     u_long iMode = 1;
@@ -106,9 +106,9 @@ int server_accept_client()
 #else
     int nodelay = 1;
     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
-    int sendbuf = 2 * 1024 * 1024;
+    int sendbuf = 8 * 1024 * 1024;
     setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &sendbuf, sizeof(sendbuf));
-    int recvbuf = 2 * 1024 * 1024;
+    int recvbuf = 8 * 1024 * 1024;
     setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &recvbuf, sizeof(recvbuf));
     // Non-block mode
     int flags = fcntl(client_fd, F_GETFL, 0);
@@ -224,7 +224,6 @@ static void handle_client_packet(int client_index, uint8_t type, const char* dat
 void server_recv_msgs()
 {
     for (int i = 0; i < client_count; ++i) {
-        char buffer[65536]; // 64KB stack buffer is safe and sufficient for TCP stream
         int fd = clients[i].sock_fd;
         
         // Loop to drain socket buffer

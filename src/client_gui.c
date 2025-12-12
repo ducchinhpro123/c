@@ -34,6 +34,10 @@
 
 Message messages[MAX_MESSAGES];
 
+// For buffering
+static unsigned char* g_chunk_buffer = NULL;
+static unsigned char* g_payload_buffer = NULL;
+
 static bool edit_mode = false;
 static char text_buffer[MSG_BUFFER] = "";
 static MessageQueue g_mq = { 0 }; // Init message queue
@@ -42,7 +46,6 @@ static MessageQueue g_mq = { 0 }; // Init message queue
 static char g_message_recv[MSG_BUFFER];
 
 #define MAX_ACTIVE_TRANSFERS 8
-#define MAX_CHUNKS_PER_BATCH 64
 #define TRANSFER_PUMP_BUDGET_MS 8.0f
 #define INCOMING_STREAM_CAPACITY (MSG_BUFFER * 5)
 
@@ -1022,6 +1025,20 @@ static bool has_active_transfer(void)
     return false;
 }
 
+
+static bool ensure_transfer_buffers()
+{
+    if (!g_chunk_buffer) g_chunk_buffer = (unsigned char*) malloc(FILE_CHUNK_SIZE);
+    if (!g_payload_buffer) g_payload_buffer = (unsigned char*) malloc(FILE_ID_LEN + FILE_CHUNK_SIZE);
+
+    if (!g_payload_buffer || !g_chunk_buffer) {
+        free(g_chunk_buffer); g_chunk_buffer = NULL;
+        free(g_payload_buffer); g_payload_buffer = NULL;
+        return false;
+    }
+    return true;
+}
+
 // Send chunks every frame
 static void pump_outgoing_transfers(ClientConnection* conn)
 {
@@ -1052,15 +1069,22 @@ static void pump_outgoing_transfers(ClientConnection* conn)
     }
     if (!any_active) return;
 
-    unsigned char* chunk_buffer = malloc(FILE_CHUNK_SIZE);
-    unsigned char* payload_buffer = malloc(FILE_ID_LEN + FILE_CHUNK_SIZE);
-
-    if (!chunk_buffer || !payload_buffer) {
-        TraceLog(LOG_ERROR, "Failed to allocate buffers for file transfer");
-        if (chunk_buffer) free(chunk_buffer);
-        if (payload_buffer) free(payload_buffer);
+    // unsigned char* chunk_buffer = malloc(FILE_CHUNK_SIZE);
+    // unsigned char* payload_buffer = malloc(FILE_ID_LEN + FILE_CHUNK_SIZE);
+    //
+    // if (!chunk_buffer || !payload_buffer) {
+    //     TraceLog(LOG_ERROR, "Failed to allocate buffers for file transfer");
+    //     if (chunk_buffer) free(chunk_buffer);
+    //     if (payload_buffer) free(payload_buffer);
+    //     return;
+    // }
+    if (!ensure_transfer_buffers()) {
+        TraceLog(LOG_ERROR, "Failed to allocate persistent buffers for file transfer");
         return;
     }
+
+    unsigned char* chunk_buffer = g_chunk_buffer;
+    unsigned char* payload_buffer = g_payload_buffer;
 
     for (int i = 0; i < MAX_ACTIVE_TRANSFERS; ++i) {
         OutgoingTransfer* t = &outgoing_transfers[i];
@@ -1134,8 +1158,6 @@ static void pump_outgoing_transfers(ClientConnection* conn)
         }
 
     }
-    free(chunk_buffer);
-    free(payload_buffer);
 }
 
 static void draw_transfer_status(Font custom_font)
@@ -1355,7 +1377,7 @@ int main()
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, window_title);
     SetTargetFPS(FPS);
     Font comic_font = LoadFont("resources/fonts/ComicMono.ttf");
-    Font comic_font_bold = LoadFont("resources/fonts/ComicMono-Bold.ttf");
+    // Font comic_font_bold = LoadFont("resources/fonts/ComicMono-Bold.ttf");
 
     char server_ip[16] = "127.0.0.1";
     int server_port = 8898;
@@ -1434,6 +1456,9 @@ int main()
 
         EndDrawing();
     }
+
+    free(g_chunk_buffer); g_chunk_buffer = NULL;
+    free(g_payload_buffer); g_payload_buffer = NULL;
 
     cleanup_network();
     CloseWindow();
