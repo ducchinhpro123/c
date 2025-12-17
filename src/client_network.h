@@ -25,7 +25,7 @@ typedef struct {
 #include <pthread.h>
 #include "packet_queue.h"
 
-typedef struct {
+typedef struct ClientConnection {
     int socket_fd;
     bool connected;
     char username[256];

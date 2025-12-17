@@ -403,9 +403,8 @@ static ssize_t send_all_to_client(int socket_fd, const char* data, size_t len)
     const int MAX_RETRIES = (len > 10000) ? 10000 : 100; // Much more retries for large packets
     
     // Calculate progressive timeout based on data size
-    int base_wait_ms = 10; // Start with 10ms
-    if (len > 100000) base_wait_ms = 50; // 50ms for >100KB
-    if (len > 1000000) base_wait_ms = 100; // 100ms for >1MB
+    // Calculate progressive timeout based on data size
+    int base_wait_ms = 1; // Start with 1ms
     
     while (total_sent < len) {
 #ifdef _WIN32
@@ -443,7 +442,7 @@ static ssize_t send_all_to_client(int socket_fd, const char* data, size_t len)
                 }
                 
                 // Cap max wait to prevent excessive delays
-                if (wait_ms > 1000) wait_ms = 1000; // Max 1 second
+                if (wait_ms > 50) wait_ms = 50; // Max 50ms
                 
                 TraceLog(LOG_DEBUG, "Socket buffer full, retry %d/%d, waiting %dms, sent %zu/%zu bytes",
                          retry_count, MAX_RETRIES, wait_ms, total_sent, len);

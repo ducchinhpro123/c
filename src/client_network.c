@@ -181,14 +181,7 @@ static ssize_t send_all(int socket_fd, const char* data, size_t len)
     int retry_count = 0;
     const int MAX_RETRIES = (len > 10000) ? 2000 : 200;
 
-    int base_wait_ms = 2;
-    if (len > 1000000) {
-        base_wait_ms = 50;
-    } else if (len > 100000) {
-        base_wait_ms = 20;
-    } else if (len > 10000) {
-        base_wait_ms = 10;
-    }
+    int base_wait_ms = 1;
 
     while (total_sent < len) {
 #ifdef _WIN32
@@ -212,8 +205,8 @@ static ssize_t send_all(int socket_fd, const char* data, size_t len)
                     wait_ms *= 5;
                 if (retry_count > 1000)
                     wait_ms *= 10;
-                if (wait_ms > 1000)
-                    wait_ms = 1000;
+                if (wait_ms > 50)
+                    wait_ms = 50;
 
                 usleep((useconds_t)wait_ms * 1000);
                 continue;

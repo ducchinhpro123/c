@@ -47,7 +47,9 @@ int main(int argc, char **argv)
             "src/client_network.c",
             "src/message.c",
             "src/file_transfer.c",
-            "src/packet_queue.c");
+            "src/packet_queue.c",
+            "src/file_transfer_state.c",
+            "src/ui_components.c");
         nob_cmd_append(&cmd, "-L", raylib_lib);
         nob_cmd_append(&cmd,
             "-lraylib",
@@ -99,7 +101,9 @@ int main(int argc, char **argv)
             "src/client_network.c",
             "src/message.c",
             "src/file_transfer.c",
-            "src/packet_queue.c");
+            "src/packet_queue.c",
+            "src/file_transfer_state.c",
+            "src/ui_components.c");
         nob_cmd_append(&cmd, "-L", raylib_lib);
         nob_cmd_append(&cmd, "-Wl,-rpath,$ORIGIN/../thirdparty/raylib-5.5_linux_amd64/lib");
         nob_cmd_append(&cmd, "-lraylib", "-lpthread", "-ldl", "-lrt", "-lX11", "-lm");
