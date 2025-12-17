@@ -29,8 +29,10 @@
 #pragma GCC diagnostic pop
 
 #define FPS 60
-#define USERNAME_BUFFER 64
+#define USERNAME_BUFFER 24
 #define FILENAME_TRUNCATE_THRESHOLD 25
+
+#define MAX_USERNAME_LENGTH 12
 
 Message messages[MAX_MESSAGES];
 
