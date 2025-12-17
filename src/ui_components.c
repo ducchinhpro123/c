@@ -4,7 +4,7 @@
 #include "message.h"
 #include "warning_dialog.h"
 #include "window.h" // For WINDOW_WIDTH/HEIGHT
-#include "platform.h"
+// #include "platform.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -329,6 +329,7 @@ void connection_screen(int* port, char* server_ip, char* port_str, char* usernam
             tmp[USERNAME_BUFFER - 1] = '\0';
             char *username_trimmed = tmp, *e = tmp + strlen(tmp);
 
+            // Santize username
             while (*username_trimmed && (*username_trimmed == ' ' || *username_trimmed == '\t' || *username_trimmed == '\n' || *username_trimmed == '\r'))
                 username_trimmed++;
             while (e > username_trimmed && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r'))

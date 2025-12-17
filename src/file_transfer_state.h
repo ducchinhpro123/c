@@ -8,6 +8,8 @@
 #define MAX_ACTIVE_TRANSFERS 8
 #define INCOMING_STREAM_CAPACITY (65536 * 80)
 
+#include <stdint.h>
+
 struct ClientConnection;
 
 typedef struct {
