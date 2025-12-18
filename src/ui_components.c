@@ -5,6 +5,7 @@
 #include "warning_dialog.h"
 #include "window.h" // For WINDOW_WIDTH/HEIGHT
 // #include "platform.h"
+#include <raylib.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,14 +91,17 @@ void text_input(struct ClientConnection* conn, const char* username, MessageQueu
     if (was_sent && strlen(text_buffer) > 0) {
         size_t raw_len = strnlen(text_buffer, MSG_BUFFER - 1);
         char* tmp = (char*)malloc(raw_len + 1);
-        if (!tmp) return;
+        if (!tmp)
+            return;
         memcpy(tmp, text_buffer, raw_len);
         tmp[raw_len] = '\0';
-        
+
         // simple trim
         char *s = tmp, *e = tmp + strlen(tmp);
-        while (*s && (*s == ' ' || *s == '\t' || *s == '\r')) s++;
-        while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r')) *--e = '\0';
+        while (*s && (*s == ' ' || *s == '\t' || *s == '\r'))
+            s++;
+        while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r'))
+            *--e = '\0';
 
         if (*s) {
             size_t fmt_len = strlen(username) + strlen(s) + 3; // "u: m" + null
@@ -109,7 +113,8 @@ void text_input(struct ClientConnection* conn, const char* username, MessageQueu
                     add_message(mq, "me", s);
                     text_buffer[0] = '\0'; // reset
                     edit_mode = true;
-                    if (should_scroll) *should_scroll = true;
+                    if (should_scroll)
+                        *should_scroll = true;
                     // TraceLog(LOG_INFO, "Sent: %s", formatted_msg);
                 }
                 free(formatted_msg);
@@ -152,11 +157,11 @@ static void draw_wrapped_text(Font font, const char* text, Vector2 pos, float fo
 
     while (word != NULL) {
         char* next_word = strtok(NULL, " ");
-        char word_buffer[256]; 
-        
+        char word_buffer[256];
+
         size_t word_len = strlen(word);
         if (word_len >= sizeof(word_buffer) - 1) {
-             word_len = sizeof(word_buffer) - 2;
+            word_len = sizeof(word_buffer) - 2;
         }
 
         if (next_word != NULL) {
@@ -168,7 +173,7 @@ static void draw_wrapped_text(Font font, const char* text, Vector2 pos, float fo
         Vector2 word_size = MeasureTextEx(font, word_buffer, font_size, spacing);
 
         if (cur_x + word_size.x > pos.x + max_width) {
-            cur_x = pos.x; 
+            cur_x = pos.x;
             cur_y += word_size.y + spacing;
         }
 
@@ -193,7 +198,7 @@ void panel_scroll_msg(Font custom_font, MessageQueue* mq, bool* should_scroll)
     int x_pos = ((WINDOW_WIDTH - panel_width) / 2) - 150;
     int y_pos = (WINDOW_HEIGHT - panel_height) / 2;
 
-    float total_len_height = 10.f; 
+    float total_len_height = 10.f;
     for (int i = 0; i < mq->count; i++) {
         const char* msg = mq->messages[i].text;
         const char* sender = mq->messages[i].sender;
@@ -207,7 +212,7 @@ void panel_scroll_msg(Font custom_font, MessageQueue* mq, bool* should_scroll)
         float message_height = lines_count * (font_size + spacing);
         total_len_height += message_height + 15;
     }
-    total_len_height += 20.f; 
+    total_len_height += 20.f;
 
     Rectangle panel_rec = { (float)x_pos, (float)y_pos, (float)panel_width, (float)panel_height };
     Rectangle panel_content_rec = { 0, 0, (float)panel_width - 15, total_len_height };
@@ -216,20 +221,20 @@ void panel_scroll_msg(Font custom_font, MessageQueue* mq, bool* should_scroll)
     static Vector2 panel_scroll = { 0, 0 };
     GuiScrollPanel(panel_rec, "CHAT", panel_content_rec, &panel_scroll, &panel_view);
 
-    float cumulative_height = 10; 
+    float cumulative_height = 10;
     BeginScissorMode((int)panel_view.x, (int)panel_view.y, (int)panel_view.width, (int)panel_view.height);
     {
         for (int i = 0; i < mq->count; i++) {
             const char* sender = mq->messages[i].sender;
             const char* msg = mq->messages[i].text;
 
-            float pos_x_sender_label = panel_view.x + 10 - panel_scroll.x; 
+            float pos_x_sender_label = panel_view.x + 10 - panel_scroll.x;
 
             char sender_label[258];
             snprintf(sender_label, sizeof(sender_label), "%s:", sender);
             Vector2 sender_size = MeasureTextEx(custom_font, sender_label, font_size, spacing);
             float avail_width = panel_view.width - sender_size.x - gap;
-            
+
             float pos_x_msg = pos_x_sender_label + sender_size.x + gap;
 
             int lines_count = calculate_wrapped_lines(custom_font, msg, font_size, spacing, avail_width);
@@ -247,7 +252,7 @@ void panel_scroll_msg(Font custom_font, MessageQueue* mq, bool* should_scroll)
 
             draw_wrapped_text(custom_font, msg, (Vector2) { pos_x_msg, y_pos_msg }, font_size, spacing, avail_width, BLACK);
 
-            cumulative_height += message_height + 15; 
+            cumulative_height += message_height + 15;
         }
 
         if (should_scroll && *should_scroll) {
@@ -375,8 +380,8 @@ void files_displaying(Font font)
 {
     int panel_width = 300;
     int panel_height = 400;
-    int y_panel_pos = 700; 
-    int x_panel_pos = 320; 
+    int y_panel_pos = 700;
+    int x_panel_pos = 320;
 
     Rectangle panel_rec = { (float)WINDOW_WIDTH - x_panel_pos, (WINDOW_HEIGHT - y_panel_pos) / 2.f, (float)panel_width, (float)panel_height };
     Rectangle panel_view = { 0 };
@@ -384,11 +389,11 @@ void files_displaying(Font font)
     float line_height = 25.f;
     float font_size = 13.f;
 
-    float total_len_height = 10.f; 
+    float total_len_height = 10.f;
     for (int i = 0; i < received_files_count; i++) {
         total_len_height += (font_size + spacing) + 15;
     }
-    total_len_height += 20.f; 
+    total_len_height += 20.f;
     Rectangle panel_content_rec = { 0, 0, (float)panel_width + 30, total_len_height };
 
     static Vector2 panel_scroll = { 0, 0 };
@@ -408,7 +413,7 @@ void files_displaying(Font font)
 
                 float btn_x = panel_view.x + panel_view.width - 30;
                 float btn_y = panel_view.y + y_offset + panel_scroll.y;
-                
+
                 if (GuiButton((Rectangle) { btn_x, btn_y, 20, 20 }, "#9#")) {
                     remove_selected_file(received_files[i].filename);
                 }
@@ -433,16 +438,16 @@ void files_displaying(Font font)
     int prevBaseColor = GuiGetStyle(BUTTON, BASE_COLOR_NORMAL);
     int prevTextColor = GuiGetStyle(BUTTON, TEXT_COLOR_NORMAL);
     int prevBorderColor = GuiGetStyle(BUTTON, BORDER_COLOR_NORMAL);
-    
+
     GuiSetStyle(BUTTON, BASE_COLOR_NORMAL, ColorToInt(RED));
     GuiSetStyle(BUTTON, TEXT_COLOR_NORMAL, ColorToInt(WHITE));
     GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL, ColorToInt(MAROON));
-    
+
     if (received_files_count > 0 && GuiButton((Rectangle) { (float)WINDOW_WIDTH - panel_width, ((WINDOW_HEIGHT - panel_height) / 2.f) + 270, 120, 30 }, "#9# Remove all files")) {
         remove_all_files();
         scan_received_folder();
     }
-    
+
     GuiSetStyle(BUTTON, BASE_COLOR_NORMAL, prevBaseColor);
     GuiSetStyle(BUTTON, TEXT_COLOR_NORMAL, prevTextColor);
     GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL, prevBorderColor);
@@ -456,7 +461,7 @@ void draw_transfer_status(Font custom_font)
 
     int x = 40;
     int y = WINDOW_HEIGHT - 180;
-    DrawText("Outgoing transfers", x, y, 18, DARKGRAY);
+    DrawTextEx(custom_font, "Outgoing transfers", (Vector2) { x, y }, 18, 2, BLACK);
     y += 20;
     for (int i = 0; i < MAX_ACTIVE_TRANSFERS; ++i) {
         OutgoingTransfer* t = &outgoing_transfers[i];
@@ -469,13 +474,15 @@ void draw_transfer_status(Font custom_font)
         DrawRectangle(x, y, (int)(300 * progress), 18, SKYBLUE);
         char label[256];
         snprintf(label, sizeof(label), "%.40s (%.1f%%)", t->filename, progress * 100.0f);
-        DrawText(label, x + 5, y + 2, 14, BLACK);
+        // DrawText(label, x + 5, y + 2, 14, BLACK);
+        // DrawTextEx(Font font, const char *text, Vector2 position, float fontSize, float spacing, Color tint); // Draw text using font and additional parameters
+        DrawTextEx(custom_font, label, (Vector2) { x + 5, y + 2 }, 14, 2, BLACK);
         y += 26;
     }
 
     x = WINDOW_WIDTH - 360;
     y = WINDOW_HEIGHT - 180;
-    DrawText("Incoming transfers", 40, y + 50, 18, DARKGRAY);
+    DrawTextEx(custom_font, "Incoming transfers", (Vector2) { 40, y + 50 }, 18, 2, BLACK);
     y += 20;
     for (int i = 0; i < MAX_ACTIVE_TRANSFERS; ++i) {
         IncomingTransfer* t = &incoming_transfers[i];
@@ -488,7 +495,8 @@ void draw_transfer_status(Font custom_font)
         DrawRectangle(x, y, (int)(300 * progress), 18, LIME);
         char label[256];
         snprintf(label, sizeof(label), "%.40s (%.1f%%)", t->filename, progress * 100.0f);
-        DrawText(label, x + 5, y + 2, 14, BLACK);
+        // DrawText(label, x + 5, y + 2, 14, BLACK);
+        DrawTextEx(custom_font, label, (Vector2) { x + 5, y + 2 }, 14, 2, BLACK);
         y += 26;
     }
 }

@@ -35,29 +35,51 @@ int main(int argc, char **argv)
             nob_cmd_append(&cmd, "-Wall", "-Wextra", "-g");
             nob_cmd_append(&cmd, "-I./src", "-I./src/test");
             nob_cmd_append(&cmd, "-I", raylib_include);
-            nob_cmd_append(&cmd, "-o", "build/test_runner");
+            nob_cmd_append(&cmd, "-o", "build/test_client_logic");
             nob_cmd_append(&cmd,
                 "src/test/test_client_logic.c",
                 "src/client_logic.c",
                 "src/test/unity.c");
-            
-            // Link Raylib for TraceLog
             nob_cmd_append(&cmd, "-L", raylib_lib);
 #ifdef _WIN32
             nob_cmd_append(&cmd, "-lraylib", "-lopengl32", "-lgdi32", "-lwinmm", "-lws2_32", "-lpthread");
-            // Keep raylib.dll
-            if (!nob_copy_file("thirdparty/raylib-windows/lib/raylib.dll", "build/raylib.dll")) {}
 #else
             nob_cmd_append(&cmd, "-Wl,-rpath,$ORIGIN/../thirdparty/raylib-5.5_linux_amd64/lib");
             nob_cmd_append(&cmd, "-lraylib", "-lpthread", "-ldl", "-lrt", "-lX11", "-lm");
 #endif
+            if (!nob_cmd_run_sync(cmd)) return 1;
 
+            nob_log(NOB_INFO, "Building test_file_transfer...");
+            cmd.count = 0;
+            nob_cmd_append(&cmd, cc);
+            nob_cmd_append(&cmd, "-Wall", "-Wextra", "-g");
+            nob_cmd_append(&cmd, "-I./src", "-I./src/test");
+            nob_cmd_append(&cmd, "-I", raylib_include);
+            nob_cmd_append(&cmd, "-o", "build/test_file_transfer");
+            nob_cmd_append(&cmd,
+                "src/test/test_file_transfer.c",
+                "src/client_logic.c",
+                "src/file_transfer.c",
+                "src/packet_queue.c",
+                "src/test/unity.c");
+            nob_cmd_append(&cmd, "-L", raylib_lib);
+#ifdef _WIN32
+            nob_cmd_append(&cmd, "-lraylib", "-lopengl32", "-lgdi32", "-lwinmm", "-lws2_32", "-lpthread");
+#else
+            nob_cmd_append(&cmd, "-Wl,-rpath,$ORIGIN/../thirdparty/raylib-5.5_linux_amd64/lib");
+            nob_cmd_append(&cmd, "-lraylib", "-lpthread", "-ldl", "-lrt", "-lX11", "-lm");
+#endif
             if (!nob_cmd_run_sync(cmd)) return 1;
 
             // Run the tests
-            nob_log(NOB_INFO, "Running tests...");
+            nob_log(NOB_INFO, "Running client logic tests...");
             cmd.count = 0;
-            nob_cmd_append(&cmd, "./build/test_runner");
+            nob_cmd_append(&cmd, "./build/test_client_logic");
+            if (!nob_cmd_run_sync(cmd)) return 1;
+
+            nob_log(NOB_INFO, "Running file transfer tests...");
+            cmd.count = 0;
+            nob_cmd_append(&cmd, "./build/test_file_transfer");
             if (!nob_cmd_run_sync(cmd)) return 1;
 
             nob_cmd_free(cmd);

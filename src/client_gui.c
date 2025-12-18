@@ -83,10 +83,10 @@ int main()
 
     while (!WindowShouldClose()) {
         // For file tranfer handling
-        if (is_connected) {
-            process_file_drop(&conn);
-            pump_outgoing_transfers(&conn);
-        }
+        // if (is_connected) {
+        //     process_file_drop(&conn);
+        //     pump_outgoing_transfers(&conn);
+        // }
 
         ClearBackground(RAYWHITE);
 
@@ -119,6 +119,10 @@ int main()
 
         if (is_connected) {
             files_displaying(comic_font);
+
+            process_file_drop(&conn);
+            pump_outgoing_transfers(&conn);
+
             if (has_active_transfer()) {
                 draw_transfer_status(comic_font);
             }
@@ -249,7 +253,7 @@ static void pump_outgoing_transfers(ClientConnection* conn)
             send_packet(conn, PACKET_TYPE_FILE_END, message_buffer, (uint32_t)strlen(message_buffer));
 
             char buf[512];
-            snprintf(buf, sizeof(buf), "SYSTEM: Finished sending %s", t->filename);
+            snprintf(buf, sizeof(buf), "Finished sending %s", t->filename);
             add_message(&g_mq, "SYSTEM", buf);
 
             close_outgoing_transfer(conn, t, NULL);

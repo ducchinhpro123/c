@@ -19,6 +19,13 @@
     #include <ws2tcpip.h>
     #include <windows.h>
     #include <direct.h>
+    #include <sys/types.h>
+    #include <sys/stat.h>
+
+    // Compatibility for S_ISREG on Windows
+    #ifndef S_ISREG
+        #define S_ISREG(mode) (((mode) & S_IFMT) == S_IFREG)
+    #endif
 
     typedef int socklen_t;
 

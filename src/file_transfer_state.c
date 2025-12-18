@@ -1,21 +1,21 @@
 #include "file_transfer_state.h"
 #include "client_network.h"
-#include "packet_queue.h"
 #include "message.h"
+#include "packet_queue.h"
 #include "platform.h"
+#include <errno.h>
 #include <raylib.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <errno.h>
 
 #ifdef _WIN32
-    #include <io.h>
-    #include <direct.h>
+#include <direct.h>
+#include <io.h>
 #else
-    #include <dirent.h>
-    #include <unistd.h>
+#include <dirent.h>
+#include <unistd.h>
 #endif
 
 OutgoingTransfer outgoing_transfers[MAX_ACTIVE_TRANSFERS];
@@ -116,10 +116,12 @@ void finalize_incoming_transfer(IncomingTransfer* transfer, bool success, const 
 
     if (success) {
         char buf[512];
-        snprintf(buf, sizeof(buf), "SYSTEM: Received file %.200s from %.120s (%zu bytes)",
+
+        // snprintf(buf, sizeof(buf), "Sending %s (%.2f MB)", slot->filename, slot->total_bytes / (1024.0 * 1024.0));
+        snprintf(buf, sizeof(buf), "Received file %.200s from %.120s (%.2f MB)",
             filename_copy[0] ? filename_copy : "file",
             sender_copy[0] ? sender_copy : "peer",
-            total_bytes_copy);
+            total_bytes_copy / (1024.0 * 1024.0));
         add_message(&g_mq, "SYSTEM", buf);
         // Rescan received folder
         scan_received_folder();
@@ -183,7 +185,7 @@ void scan_received_folder(void)
             continue;
         if (!(ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && received_files_count < 100) {
             strncpy(received_files[received_files_count].filename, ffd.cFileName,
-                    sizeof(received_files[received_files_count].filename) - 1);
+                sizeof(received_files[received_files_count].filename) - 1);
             LARGE_INTEGER filesize;
             filesize.LowPart = ffd.nFileSizeLow;
             filesize.HighPart = ffd.nFileSizeHigh;
@@ -207,7 +209,7 @@ void scan_received_folder(void)
         struct stat st;
         if (stat(filepath, &st) == 0 && S_ISREG(st.st_mode)) {
             strncpy(received_files[received_files_count].filename, entry->d_name,
-                    sizeof(received_files[received_files_count].filename) - 1);
+                sizeof(received_files[received_files_count].filename) - 1);
             received_files[received_files_count].size = st.st_size;
             received_files_count++;
         }

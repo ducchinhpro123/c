@@ -241,7 +241,7 @@ static void handle_file_packet(MessageQueue* mq, int type, const char* data, siz
         }
 
         char buf[512];
-        snprintf(buf, sizeof(buf), "SYSTEM: Receiving %.200s from %.120s (%.2f MB)",
+        snprintf(buf, sizeof(buf), "Receiving %.200s from %.120s (%.2f MB)",
             slot->filename,
             slot->sender,
             slot->total_bytes / (1024.0 * 1024.0));
