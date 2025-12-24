@@ -274,7 +274,7 @@ void introduction_window(Font custom_font)
     center_text_horizontally("Hi, thank you for using this application. You are a peer in a LAN", 20, 150, RED, custom_font);
     center_text_horizontally("This app lets you chat along with sharing files with other peers in a LAN.", 20, 270, RED, custom_font);
     center_text_horizontally("There is nothing much to say; happy coding, and good luck!!!", 20, 310, RED, custom_font);
-    center_text_horizontally("Author: Vo Duc Chinh - ST22B - UDA", 30, 650, RED, custom_font);
+    center_text_horizontally("Author: Vo Duc Chinh - ST22B - UDA", 30, 850, RED, custom_font);
 }
 
 void connection_screen(int* port, char* server_ip, char* port_str, char* username, bool* is_connected, struct ClientConnection* conn)
@@ -399,6 +399,7 @@ void files_displaying(Font font)
     static Vector2 panel_scroll = { 0, 0 };
     GuiScrollPanel(panel_rec, NULL, panel_content_rec, &panel_scroll, &panel_view);
 
+    // From begin of scissor mode
     BeginScissorMode((int)panel_view.x, (int)panel_view.y, (int)panel_view.width, (int)panel_view.height);
     {
         float y_offset = 5.f;
@@ -434,6 +435,7 @@ void files_displaying(Font font)
         }
     }
     EndScissorMode();
+    // End of scissor mode
 
     int prevBaseColor = GuiGetStyle(BUTTON, BASE_COLOR_NORMAL);
     int prevTextColor = GuiGetStyle(BUTTON, TEXT_COLOR_NORMAL);

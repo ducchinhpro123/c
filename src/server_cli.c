@@ -32,6 +32,8 @@ int main(void)
     fflush(stdout);
 
     int prev_client_count = get_client_count();
+    printf("Entering main loop. g_running=%d\n", g_running);
+    fflush(stdout);
 
     while (g_running) {
         server_accept_client();

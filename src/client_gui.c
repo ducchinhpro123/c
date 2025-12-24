@@ -61,6 +61,7 @@ int main()
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, window_title);
     SetTargetFPS(FPS);
     Font comic_font = LoadFont("resources/fonts/ComicMono.ttf");
+    Font welcome_font = LoadFont("resources/fonts/Hack-Bold.ttf");
 
     char server_ip[16] = "127.0.0.1";
     int server_port = 8898;
@@ -81,13 +82,19 @@ int main()
     ensure_receive_directory();
     scan_received_folder();
 
-    while (!WindowShouldClose()) {
-        // For file tranfer handling
-        // if (is_connected) {
-        //     process_file_drop(&conn);
-        //     pump_outgoing_transfers(&conn);
-        // }
+    Image anime_left = LoadImage("resources/anime.png");
+    Image anime_right = LoadImage("resources/anime2.png");
+    ImageResize(&anime_left, 350, 230);
+    ImageResize(&anime_right, 390, 430);
 
+    /* ImageDrawPixel(&anime, 100, 100, RED); */
+
+    Texture2D animeTex_left = LoadTextureFromImage(anime_left);
+    Texture2D animeTex_right = LoadTextureFromImage(anime_right);
+    UnloadImage(anime_left);
+    UnloadImage(anime_right);
+
+    while (!WindowShouldClose()) {
         ClearBackground(RAYWHITE);
 
         BeginDrawing();
@@ -95,13 +102,21 @@ int main()
         if (!is_connected) {
             introduction_window(comic_font);
             connection_screen(&server_port, server_ip, port_str, username, &is_connected, &conn);
+            DrawTexture(animeTex_left, 
+                    100,
+                    (GetScreenHeight() - animeTex_left.height) / 2,
+                    WHITE);
+
+            DrawTexture(animeTex_right, 
+                    800,
+                    ((GetScreenHeight() - animeTex_right.height) / 2) + 100,
+                    WHITE);
         }
 
         if (is_connected) {
             panel_scroll_msg(comic_font, &g_mq, &should_scroll_to_bottom);
             text_input(&conn, username, &g_mq, &should_scroll_to_bottom);
 
-            /*-------------------------- RECEIVE --------------------------*/
             if (update_client_state(&conn, &g_mq)) {
                 should_scroll_to_bottom = true;
             }
@@ -112,12 +127,7 @@ int main()
                 // But we check conn.connected to switch UI
                 show_error("Connection lost"); 
             }
-        }
 
-        // Display welcome mesasge at the center horizontally
-        welcome_msg(GetFontDefault());
-
-        if (is_connected) {
             files_displaying(comic_font);
 
             process_file_drop(&conn);
@@ -127,6 +137,9 @@ int main()
                 draw_transfer_status(comic_font);
             }
         }
+
+        // Display welcome mesasge at the center horizontally
+        welcome_msg(welcome_font);
 
         setting_button();
 
@@ -143,6 +156,11 @@ int main()
 
     free(g_chunk_buffer); g_chunk_buffer = NULL;
     free(g_payload_buffer); g_payload_buffer = NULL;
+
+    UnloadFont(welcome_font);
+    UnloadFont(comic_font);
+    UnloadTexture(animeTex_left);
+    UnloadTexture(animeTex_right);
 
     cleanup_network();
     CloseWindow();
@@ -206,6 +224,7 @@ static void pump_outgoing_transfers(ClientConnection* conn)
         if (!t->active)
             continue;
 
+        // If hasn't sent metadata
         if (!t->meta_sent) {
             char meta[1024];
             snprintf(meta, sizeof(meta), "%s|%s|%s|%zu|%zu",
@@ -216,12 +235,13 @@ static void pump_outgoing_transfers(ClientConnection* conn)
         }
 
         int chunks_sent_this_frame = 0;
-        
+
         while (t->sent_bytes < t->total_bytes && chunks_sent_this_frame < MAX_CHUNKS_PER_FRAME) {
             if (pq_get_data_size(&conn->queue) > MAX_QUEUE_SIZE)
                 break;
 
             size_t remaining = t->total_bytes - t->sent_bytes;
+            // Whether to read amount of chunk_size of read the whole remaining
             size_t to_read = (remaining > t->chunk_size) ? t->chunk_size : remaining;
 
             size_t read_count = fread(chunk_buffer, 1, to_read, t->fp);
@@ -262,8 +282,6 @@ static void pump_outgoing_transfers(ClientConnection* conn)
     }
 }
 
-
-
 static void start_outgoing_transfer(ClientConnection* conn, const char* file_path)
 {
     if (!conn || !file_path)
@@ -297,6 +315,7 @@ static void start_outgoing_transfer(ClientConnection* conn, const char* file_pat
         return;
     }
 
+    // Setup slot based on file metadata
     memset(slot, 0, sizeof(*slot));
     slot->active = true;
     slot->fp = fp;
@@ -305,6 +324,7 @@ static void start_outgoing_transfer(ClientConnection* conn, const char* file_pat
     slot->sent_bytes = 0;
     slot->next_chunk_index = 0;
     slot->chunks_total = (slot->total_bytes + slot->chunk_size - 1) / slot->chunk_size;
+
     if (conn->username[0] == '\0') {
         strncpy(slot->sender, "Unknown", sizeof(slot->sender) - 1);
         slot->sender[sizeof(slot->sender) - 1] = '\0';

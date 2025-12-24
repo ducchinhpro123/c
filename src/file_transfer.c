@@ -39,6 +39,7 @@ void generate_file_id(char* out, size_t len)
 void sanitize_filename(char* filename)
 {
     size_t len = strlen(filename);
+
     for (size_t i = 0; i < len; ++i) {
         unsigned char c = (unsigned char)filename[i];
         if (c == '|' || c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '\n' || c == '\r') {

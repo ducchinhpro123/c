@@ -5,6 +5,7 @@
 // #include <netdb.h>
 // #include <netinet/in.h>
 // #include <netinet/tcp.h>
+#include <pthread.h>
 #include <raylib.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,6 +65,7 @@ void init_client_connection(ClientConnection* conn)
 // Helper: Set socket options for high-speed LAN transfer
 static void optimize_socket_for_lan(int socket_fd)
 {
+    int pr = 8;
     // Disable Nagle's algorithm for immediate sending
 #ifdef _WIN32
     char flag = 1; // Windows uses char* instead of int*
@@ -76,26 +78,26 @@ static void optimize_socket_for_lan(int socket_fd)
     }
 
 #ifdef _WIN32
-    int sendbuf_size = 8 * 1024 * 1024;
+    int sendbuf_size = pr * 1024 * 1024;
     if (setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, (char*)&sendbuf_size, sizeof(sendbuf_size)) < 0) {
 #else
-    int sendbuf_size = 8 * 1024 * 1024;
+    int sendbuf_size = pr * 1024 * 1024;
     if (setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, &sendbuf_size, sizeof(sendbuf_size)) < 0) {
 #endif
         TraceLog(LOG_WARNING, "Failed to set SO_SNDBUF");
     }
 
 #ifdef _WIN32
-    int recvbuf_size = 8 * 1024 * 1024;
+    int recvbuf_size = pr * 1024 * 1024;
     if (setsockopt(socket_fd, SOL_SOCKET, SO_RCVBUF, (char*)&recvbuf_size, sizeof(recvbuf_size)) < 0) {
 #else
-    int recvbuf_size = 8 * 1024 * 1024;
+    int recvbuf_size = pr * 1024 * 1024;
     if (setsockopt(socket_fd, SOL_SOCKET, SO_RCVBUF, &recvbuf_size, sizeof(recvbuf_size)) < 0) {
 #endif
         TraceLog(LOG_WARNING, "Failed to set SO_RCVBUF");
     }
 
-    TraceLog(LOG_INFO, "Socket optimized for LAN: TCP_NODELAY, 8MB buffers");
+    TraceLog(LOG_INFO, "Socket optimized for LAN: TCP_NODELAY, %dMB buffers", pr);
 }
 
 int connect_to_server(ClientConnection* conn, const char* host, const char* port, const char* username)
@@ -163,7 +165,13 @@ int connect_to_server(ClientConnection* conn, const char* host, const char* port
 
     TraceLog(LOG_INFO, "Connected to %s:%s", host, port);
 
+    // Function signature for references
+    /* extern int pthread_create (pthread_t *__restrict __newthread, */
+    /* 			   const pthread_attr_t *__restrict __attr, */
+    /* 			   void *(*__start_routine) (void *), */
+    /* 			   void *__restrict __arg) __THROWNL __nonnull ((1, 3)); */
     // Start sender thread
+    // When a client connects to the server, a dedicated sender thread is spawned
     if (pthread_create(&conn->sender_thread, NULL, sender_thread_func, conn) != 0) {
         TraceLog(LOG_ERROR, "Failed to create sender thread");
         conn->connected = false;

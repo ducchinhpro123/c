@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdio.h>
 
+// Initializes mutex and condition variable
 void pq_init(PacketQueue* pq) {
     pq->head = NULL;
     pq->tail = NULL;
@@ -12,6 +13,7 @@ void pq_init(PacketQueue* pq) {
     pthread_cond_init(&pq->cond, NULL);
 }
 
+// Adds packet to queue, signals waiting thread
 int pq_push(PacketQueue* pq, uint8_t type, const void* data, uint32_t length) {
     Packet* pkt = (Packet*)malloc(sizeof(Packet));
     if (!pkt) return -1;

@@ -208,6 +208,7 @@ bool init_server()
     u_long iMode = 1;
     ioctlsocket(server_fd, FIONBIO, &iMode);
 #else
+    // Setup non-block mode
     int flags = fcntl(server_fd, F_GETFL, 0);
     fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
 #endif
