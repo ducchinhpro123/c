@@ -117,12 +117,21 @@ int connect_to_server(ClientConnection* conn, const char* host, const char* port
     for (p = res; p != NULL; p = p->ai_next) {
         conn->socket_fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (conn->socket_fd == -1) {
+#ifdef _WIN32
+            TraceLog(LOG_INFO, "socket failed. Continue searching: WSA error %d", WSAGetLastError());
+#else
             TraceLog(LOG_INFO, "socket failed. Continue searching: %s", strerror(errno));
+#endif
             continue;
         }
         if (connect(conn->socket_fd, p->ai_addr, p->ai_addrlen) == -1) {
+#ifdef _WIN32
+            TraceLog(LOG_INFO, "connect failed. Continue searching: WSA error %d", WSAGetLastError());
+            closesocket(conn->socket_fd);
+#else
             TraceLog(LOG_INFO, "connect failed. Continue searching: %s", strerror(errno));
             close(conn->socket_fd);
+#endif
             continue;
         }
 
@@ -157,7 +166,11 @@ int connect_to_server(ClientConnection* conn, const char* host, const char* port
         char handshake[300];
         snprintf(handshake, sizeof(handshake), "USERNAME:%s", conn->username);
         if (send_msg(conn, handshake) < 0) {
+#ifdef _WIN32
+            TraceLog(LOG_WARNING, "Failed to send username handshake: WSA error %d", WSAGetLastError());
+#else
             TraceLog(LOG_WARNING, "Failed to send username handshake: %s", strerror(errno));
+#endif
         } else {
             TraceLog(LOG_INFO, "Sent username handshake for '%s'", conn->username);
         }
@@ -175,7 +188,11 @@ int connect_to_server(ClientConnection* conn, const char* host, const char* port
     if (pthread_create(&conn->sender_thread, NULL, sender_thread_func, conn) != 0) {
         TraceLog(LOG_ERROR, "Failed to create sender thread");
         conn->connected = false;
+#ifdef _WIN32
+        closesocket(conn->socket_fd);
+#else
         close(conn->socket_fd);
+#endif
         return -1;
     }
 
@@ -193,13 +210,18 @@ static ssize_t send_all(int socket_fd, const char* data, size_t len)
 
     while (total_sent < len) {
 #ifdef _WIN32
-        ssize_t bytes_sent = send(socket_fd, data + total_sent, len - total_sent, 0);
+        ssize_t bytes_sent = send(socket_fd, data + total_sent, (int)(len - total_sent), 0);
 #else
         ssize_t bytes_sent = send(socket_fd, data + total_sent, len - total_sent, MSG_NOSIGNAL);
 #endif
 
         if (bytes_sent < 0) {
+#ifdef _WIN32
+            int err = WSAGetLastError();
+            if (err == WSAEWOULDBLOCK) {
+#else
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
+#endif
                 retry_count++;
                 if (retry_count > MAX_RETRIES) {
                     TraceLog(LOG_ERROR, "Max retries reached while sending %zu/%zu bytes", total_sent, len);
@@ -220,12 +242,20 @@ static ssize_t send_all(int socket_fd, const char* data, size_t len)
                 continue;
             }
 
+#ifdef _WIN32
+            if (err == WSAECONNRESET || err == WSAECONNABORTED) {
+                TraceLog(LOG_WARNING, "Connection closed while sending after %zu/%zu bytes", total_sent, len);
+                return -1;
+            }
+            TraceLog(LOG_ERROR, "Send error after %zu/%zu bytes: WSA error %d", total_sent, len, err);
+#else
             if (errno == EPIPE || errno == ECONNRESET) {
                 TraceLog(LOG_WARNING, "Connection closed while sending after %zu/%zu bytes", total_sent, len);
                 return -1;
             }
 
             TraceLog(LOG_ERROR, "Send error after %zu/%zu bytes: %s", total_sent, len, strerror(errno));
+#endif
             return -1;
         } else if (bytes_sent == 0) {
             retry_count++;
