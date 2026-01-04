@@ -9,7 +9,7 @@
 #include <raylib.h> // For TraceLog
 
 #ifndef MSG_BUFFER
-#define MSG_BUFFER 4096
+#define MSG_BUFFER (64 * 1024)  // 64KB recv buffer for better throughput
 #endif
 
 // Internal state variables (moved from client_gui.c)
@@ -130,7 +130,7 @@ static void handle_packet(MessageQueue* mq, uint8_t type, const char* data, size
         buffer[len] = '\0';
         handle_text_payload(mq, buffer);
         free(buffer);
-    } else if (type >= PACKET_TYPE_FILE_START && type <= PACKET_TYPE_FILE_ABORT) {
+    } else if (type >= PACKET_TYPE_FILE_START && type <= PACKET_TYPE_FILE_ACCEPT) {
         handle_file_packet(mq, type, data, len);
     } else {
         TraceLog(LOG_WARNING, "Unknown packet type: %d", type);
@@ -204,44 +204,32 @@ static void handle_file_packet(MessageQueue* mq, int type, const char* data, siz
         if (total_bytes > FILE_TRANSFER_MAX_SIZE)
             return;
 
+        // Check if transfer already exists (duplicate FILE_START)
         IncomingTransfer* slot = get_incoming_transfer(file_id);
-        if (!slot)
-            slot = get_free_incoming();
+        if (slot) {
+            TraceLog(LOG_WARNING, "Duplicate FILE_START for %s, ignoring", file_id);
+            return;
+        }
+
+        slot = get_free_incoming();
         if (!slot) {
             add_message(mq, "SYSTEM", "Too many incoming transfers, discarding file");
             return;
         }
 
-        ensure_receive_directory();
-
+        // Initialize transfer in PENDING state - don't open file yet
         memset(slot, 0, sizeof(*slot));
-        slot->active = true;
+        slot->state = TRANSFER_STATE_PENDING;
         strncpy(slot->file_id, file_id, sizeof(slot->file_id) - 1);
         strncpy(slot->filename, filename, sizeof(slot->filename) - 1);
         sanitize_filename(slot->filename);
         strncpy(slot->sender, sender, sizeof(slot->sender) - 1);
         slot->total_bytes = (size_t)total_bytes;
         slot->received_bytes = 0;
-
-        char save_path[FILE_PATH_MAX_LEN];
-        snprintf(save_path, sizeof(save_path), "received/%s", slot->filename);
-
-        int duplicate_index = 1;
-        while (access(save_path, F_OK) == 0 && duplicate_index < 1000) {
-            snprintf(save_path, sizeof(save_path), "received/%s(%d)", slot->filename, duplicate_index++);
-        }
-
-        strncpy(slot->save_path, save_path, sizeof(slot->save_path) - 1);
-        slot->save_path[sizeof(slot->save_path) - 1] = '\0';
-        slot->fp = fopen(slot->save_path, "wb");
-        if (!slot->fp) {
-            add_message(mq, "SYSTEM", "Failed to open file for writing");
-            slot->active = false;
-            return;
-        }
+        slot->fp = NULL;
 
         char buf[512];
-        snprintf(buf, sizeof(buf), "Receiving %.200s from %.120s (%.2f MB)",
+        snprintf(buf, sizeof(buf), "Incoming file: %.200s from %.120s (%.2f MB) - Accept or Reject?",
             slot->filename,
             slot->sender,
             slot->total_bytes / (1024.0 * 1024.0));
@@ -259,7 +247,23 @@ static void handle_file_packet(MessageQueue* mq, int type, const char* data, siz
         size_t chunk_len = len - FILE_ID_LEN;
 
         IncomingTransfer* slot = get_incoming_transfer(file_id);
-        if (!slot || !slot->fp)
+        if (!slot)
+            return;
+
+        // If transfer is pending, just discard chunks until user accepts
+        if (slot->state == TRANSFER_STATE_PENDING) {
+            // Buffer chunks? For now, we discard - sender will need to resend
+            // This is a design choice: we could buffer, but that uses memory
+            return;
+        }
+
+        // If transfer was rejected, also discard
+        if (slot->state == TRANSFER_STATE_REJECTED) {
+            return;
+        }
+
+        // Only write if accepted and file is open
+        if (slot->state != TRANSFER_STATE_ACCEPTED || !slot->fp)
             return;
 
         size_t written = fwrite(chunk_data, 1, chunk_len, slot->fp);
@@ -313,8 +317,47 @@ static void handle_file_packet(MessageQueue* mq, int type, const char* data, siz
 
         if (!file_id)
             return;
-        IncomingTransfer* slot = get_incoming_transfer(file_id);
-        if (slot)
-            finalize_incoming_transfer(slot, false, reason ? reason : "Aborted by sender");
+
+        // Check if this is an incoming transfer being aborted by sender
+        IncomingTransfer* in_slot = get_incoming_transfer(file_id);
+        if (in_slot) {
+            finalize_incoming_transfer(in_slot, false, reason ? reason : "Aborted by sender");
+        }
+
+        // Also check if receiver rejected our outgoing transfer
+        OutgoingTransfer* out_slot = get_outgoing_transfer(file_id);
+        if (out_slot && out_slot->active) {
+            char buf[512];
+            snprintf(buf, sizeof(buf), "Transfer rejected: %.200s (%s)",
+                out_slot->filename, reason ? reason : "Rejected by receiver");
+            add_message(mq, "SYSTEM", buf);
+            close_outgoing_transfer(NULL, out_slot, NULL);  // Don't send another abort
+        }
+
+    } else if (type == PACKET_TYPE_FILE_ACCEPT) {
+        // Receiver accepted our file transfer - start sending chunks
+        char buffer[512];
+        if (len >= sizeof(buffer))
+            len = sizeof(buffer) - 1;
+        memcpy(buffer, data, len);
+        buffer[len] = '\0';
+
+        char* save_ptr = NULL;
+        const char* sender = strtok_r(buffer, "|", &save_ptr);
+        const char* file_id = strtok_r(NULL, "|", &save_ptr);
+        (void)sender;
+
+        if (!file_id)
+            return;
+
+        OutgoingTransfer* slot = get_outgoing_transfer(file_id);
+        if (slot && slot->active && !slot->accepted) {
+            slot->accepted = true;
+            TraceLog(LOG_INFO, "Transfer %s accepted by receiver, starting data transfer", file_id);
+
+            char buf[512];
+            snprintf(buf, sizeof(buf), "Transfer accepted: %.200s - sending data...", slot->filename);
+            add_message(mq, "SYSTEM", buf);
+        }
     }
 }

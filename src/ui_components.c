@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../thirdparty/tinyfiledialogs.h"
 
 #define RAYGUI_IMPLEMENTATION
 #pragma GCC diagnostic push
@@ -488,7 +489,7 @@ void draw_transfer_status(Font custom_font)
     y += 20;
     for (int i = 0; i < MAX_ACTIVE_TRANSFERS; ++i) {
         IncomingTransfer* t = &incoming_transfers[i];
-        if (!t->active)
+        if (t->state != TRANSFER_STATE_ACCEPTED)
             continue;
         float progress = t->total_bytes == 0 ? 0.0f : (float)t->received_bytes / (float)t->total_bytes;
         if (progress > 1.0f)
@@ -501,4 +502,152 @@ void draw_transfer_status(Font custom_font)
         DrawTextEx(custom_font, label, (Vector2) { x + 5, y + 2 }, 14, 2, BLACK);
         y += 26;
     }
+}
+
+void draw_pending_transfers(Font custom_font, struct ClientConnection* conn)
+{
+    int pending_count = get_pending_transfer_count();
+    if (pending_count == 0)
+        return;
+
+    if (custom_font.baseSize == 0) {
+        custom_font = GetFontDefault();
+    }
+
+    // Draw a semi-transparent overlay
+    DrawRectangle(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, (Color){0, 0, 0, 120});
+
+    // Dialog box dimensions
+    int dialog_width = 500;
+    int dialog_height = 200;
+    int dialog_x = (WINDOW_WIDTH - dialog_width) / 2;
+    int dialog_y = (WINDOW_HEIGHT - dialog_height) / 2;
+
+    // Draw dialog background
+    DrawRectangle(dialog_x, dialog_y, dialog_width, dialog_height, RAYWHITE);
+    DrawRectangleLines(dialog_x, dialog_y, dialog_width, dialog_height, DARKGRAY);
+
+    // Get the first pending transfer
+    IncomingTransfer* transfer = get_pending_transfer(0);
+    if (!transfer)
+        return;
+
+    // Title
+    DrawTextEx(custom_font, "Incoming File Transfer",
+        (Vector2){dialog_x + 20, dialog_y + 15}, 22, 1, DARKBLUE);
+
+    // File info
+    char info_line1[512];
+    snprintf(info_line1, sizeof(info_line1), "File: %.60s", transfer->filename);
+    DrawTextEx(custom_font, info_line1,
+        (Vector2){dialog_x + 20, dialog_y + 50}, 16, 1, BLACK);
+
+    char info_line2[256];
+    snprintf(info_line2, sizeof(info_line2), "From: %.40s", transfer->sender);
+    DrawTextEx(custom_font, info_line2,
+        (Vector2){dialog_x + 20, dialog_y + 72}, 16, 1, BLACK);
+
+    char info_line3[128];
+    snprintf(info_line3, sizeof(info_line3), "Size: %.2f MB",
+        transfer->total_bytes / (1024.0 * 1024.0));
+    DrawTextEx(custom_font, info_line3,
+        (Vector2){dialog_x + 20, dialog_y + 94}, 16, 1, BLACK);
+
+    // Pending count indicator
+    if (pending_count > 1) {
+        char pending_text[64];
+        snprintf(pending_text, sizeof(pending_text), "+%d more pending", pending_count - 1);
+        DrawTextEx(custom_font, pending_text,
+            (Vector2){dialog_x + dialog_width - 130, dialog_y + 15}, 14, 1, GRAY);
+    }
+
+    // Buttons
+    int btn_width = 120;
+    int btn_height = 35;
+    int btn_y = dialog_y + dialog_height - 55;
+    int btn_spacing = 20;
+
+    // Calculate button positions (centered)
+    int total_btn_width = btn_width * 3 + btn_spacing * 2;
+    int btn_start_x = dialog_x + (dialog_width - total_btn_width) / 2;
+
+    // Accept (default folder) button - Green
+    int prevBaseColor = GuiGetStyle(BUTTON, BASE_COLOR_NORMAL);
+    int prevTextColor = GuiGetStyle(BUTTON, TEXT_COLOR_NORMAL);
+    int prevBorderColor = GuiGetStyle(BUTTON, BORDER_COLOR_NORMAL);
+
+    GuiSetStyle(BUTTON, BASE_COLOR_NORMAL, ColorToInt(GREEN));
+    GuiSetStyle(BUTTON, TEXT_COLOR_NORMAL, ColorToInt(WHITE));
+    GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL, ColorToInt(DARKGREEN));
+
+    if (GuiButton((Rectangle){btn_start_x, btn_y, btn_width, btn_height}, "Accept")) {
+        // Save file_id and sender before accept modifies transfer state
+        char file_id_copy[FILE_ID_LEN];
+        char sender_copy[256];
+        strncpy(file_id_copy, transfer->file_id, sizeof(file_id_copy) - 1);
+        file_id_copy[sizeof(file_id_copy) - 1] = '\0';
+        strncpy(sender_copy, transfer->sender, sizeof(sender_copy) - 1);
+        sender_copy[sizeof(sender_copy) - 1] = '\0';
+
+        accept_incoming_transfer(transfer, "received");
+        ensure_receive_directory();
+
+        // Send FILE_ACCEPT to sender so they can start sending chunks
+        if (conn && conn->connected) {
+            char accept_msg[512];
+            snprintf(accept_msg, sizeof(accept_msg), "%s|%s", sender_copy, file_id_copy);
+            send_packet((ClientConnection*)conn, PACKET_TYPE_FILE_ACCEPT, accept_msg, (uint32_t)strlen(accept_msg));
+        }
+    }
+
+    // Choose folder button - Blue
+    GuiSetStyle(BUTTON, BASE_COLOR_NORMAL, ColorToInt(SKYBLUE));
+    GuiSetStyle(BUTTON, TEXT_COLOR_NORMAL, ColorToInt(WHITE));
+    GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL, ColorToInt(DARKBLUE));
+
+    if (GuiButton((Rectangle){btn_start_x + btn_width + btn_spacing, btn_y, btn_width, btn_height}, "Choose Folder")) {
+        const char* folder = tinyfd_selectFolderDialog("Select Save Location", "received");
+        if (folder) {
+            // Save file_id and sender before accept modifies transfer state
+            char file_id_copy[FILE_ID_LEN];
+            char sender_copy[256];
+            strncpy(file_id_copy, transfer->file_id, sizeof(file_id_copy) - 1);
+            file_id_copy[sizeof(file_id_copy) - 1] = '\0';
+            strncpy(sender_copy, transfer->sender, sizeof(sender_copy) - 1);
+            sender_copy[sizeof(sender_copy) - 1] = '\0';
+
+            accept_incoming_transfer(transfer, folder);
+
+            // Send FILE_ACCEPT to sender so they can start sending chunks
+            if (conn && conn->connected) {
+                char accept_msg[512];
+                snprintf(accept_msg, sizeof(accept_msg), "%s|%s", sender_copy, file_id_copy);
+                send_packet((ClientConnection*)conn, PACKET_TYPE_FILE_ACCEPT, accept_msg, (uint32_t)strlen(accept_msg));
+            }
+        }
+        // If user cancels folder dialog, do nothing (stay pending)
+    }
+
+    // Reject button - Red
+    GuiSetStyle(BUTTON, BASE_COLOR_NORMAL, ColorToInt(RED));
+    GuiSetStyle(BUTTON, TEXT_COLOR_NORMAL, ColorToInt(WHITE));
+    GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL, ColorToInt(MAROON));
+
+    if (GuiButton((Rectangle){btn_start_x + (btn_width + btn_spacing) * 2, btn_y, btn_width, btn_height}, "Reject")) {
+        reject_incoming_transfer(transfer);
+        // Send FILE_ABORT to sender
+        if (conn && conn->connected) {
+            char abort_msg[512];
+            snprintf(abort_msg, sizeof(abort_msg), "%s|%s|Rejected by recipient",
+                transfer->sender, transfer->file_id);
+            send_packet((ClientConnection*)conn, PACKET_TYPE_FILE_ABORT, abort_msg, (uint32_t)strlen(abort_msg));
+        }
+        // Clear the transfer slot
+        memset(transfer, 0, sizeof(*transfer));
+    }
+
+    // Restore button styles
+    GuiSetStyle(BUTTON, BASE_COLOR_NORMAL, prevBaseColor);
+    GuiSetStyle(BUTTON, TEXT_COLOR_NORMAL, prevTextColor);
+    GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL, prevBorderColor);
 }

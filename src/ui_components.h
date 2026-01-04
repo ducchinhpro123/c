@@ -18,6 +18,7 @@ void panel_scroll_msg(Font custom_font, MessageQueue* mq, bool* should_scroll);
 void text_input(struct ClientConnection* conn, const char* username, MessageQueue* mq, bool* should_scroll);
 void files_displaying(Font font);
 void draw_transfer_status(Font custom_font);
+void draw_pending_transfers(Font custom_font, struct ClientConnection* conn);  // New: pending transfer dialog
 void center_text_horizontally(const char* text, int font_size, int y, Color color, Font custom_font);
 
 // Buttons/Debug

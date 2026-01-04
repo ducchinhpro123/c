@@ -23,8 +23,10 @@ typedef struct {
 
 void pq_init(PacketQueue* pq);
 int pq_push(PacketQueue* pq, uint8_t type, const void* data, uint32_t length);
+int pq_push_zero_copy(PacketQueue* pq, uint8_t type, void* data, uint32_t length); // Takes ownership of data
 Packet* pq_pop(PacketQueue* pq); // Blocking pop
 void pq_free_packet(Packet* pkt);
 size_t pq_get_data_size(PacketQueue* pq);
+size_t pq_get_data_size_unlocked(PacketQueue* pq); // Call only when holding external lock
 
 #endif // PACKET_QUEUE_H

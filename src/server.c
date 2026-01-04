@@ -350,7 +350,7 @@ static void handle_client_packet(int client_index, uint8_t type, const char* dat
             g_on_msg_cb(msg, clients[client_index].username);
         }
         free(msg);
-    } else if (type >= PACKET_TYPE_FILE_START && type <= PACKET_TYPE_FILE_ABORT) {
+    } else if (type >= PACKET_TYPE_FILE_START && type <= PACKET_TYPE_FILE_ACCEPT) {
         // Forward file packets
         // We need to update process_file_message to take raw data
         if (process_file_message(client_index, type, data, len)) {
@@ -399,14 +399,9 @@ static ssize_t send_all_to_client(int socket_fd, const char* data, size_t len)
 {
     size_t total_sent = 0;
     int retry_count = 0;
-    
-    // Increase max retries for large packets
-    const int MAX_RETRIES = (len > 10000) ? 10000 : 100; // Much more retries for large packets
-    
-    // Calculate progressive timeout based on data size
-    // Calculate progressive timeout based on data size
-    int base_wait_ms = 1; // Start with 1ms
-    
+    const int MAX_RETRIES = 100;  // Fewer retries since we use poll() now
+    const int POLL_TIMEOUT_MS = 100;  // Wait up to 100ms for socket to be writable
+
     while (total_sent < len) {
 #ifdef _WIN32
         ssize_t bytes_sent = send(socket_fd, data + total_sent, (int)(len - total_sent), 0);
@@ -420,36 +415,24 @@ static ssize_t send_all_to_client(int socket_fd, const char* data, size_t len)
 #else
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
 #endif
-                // Socket buffer full, wait and retry
-                retry_count++;
-                if (retry_count > MAX_RETRIES) {
-                    TraceLog(LOG_ERROR, "Max retries reached after %d attempts, sent %zu/%zu bytes (%.1f%%)",
-                             retry_count, total_sent, len, (float)total_sent / len * 100);
-                    return -1; // Return error, let caller handle it
+                // Use poll/select to wait for socket to be writable (no busy-wait)
+                int poll_result = wait_socket_writable(socket_fd, POLL_TIMEOUT_MS);
+                if (poll_result > 0) {
+                    continue;  // Socket is writable, retry immediately
+                } else if (poll_result == 0) {
+                    // Timeout
+                    retry_count++;
+                    if (retry_count > MAX_RETRIES) {
+                        TraceLog(LOG_ERROR, "Max retries reached after %d attempts, sent %zu/%zu bytes (%.1f%%)",
+                                 retry_count, total_sent, len, (float)total_sent / len * 100);
+                        return -1;
+                    }
+                    continue;
+                } else {
+                    // Poll error
+                    TraceLog(LOG_ERROR, "Poll error while waiting for socket");
+                    return -1;
                 }
-                
-                // Progressive backoff with longer waits for larger data
-                int wait_ms = base_wait_ms;
-                
-                // Increase wait time as we retry more
-                if (retry_count > 100) {
-                    wait_ms = base_wait_ms * 2; // Double after 100 retries
-                }
-                if (retry_count > 500) {
-                    wait_ms = base_wait_ms * 5; // 5x after 500 retries
-                }
-                if (retry_count > 1000) {
-                    wait_ms = base_wait_ms * 10; // 10x after 1000 retries
-                }
-                
-                // Cap max wait to prevent excessive delays
-                if (wait_ms > 50) wait_ms = 50; // Max 50ms
-                
-                TraceLog(LOG_DEBUG, "Socket buffer full, retry %d/%d, waiting %dms, sent %zu/%zu bytes",
-                         retry_count, MAX_RETRIES, wait_ms, total_sent, len);
-                
-                usleep(wait_ms * 1000);
-                continue;
             }
 #ifdef _WIN32
             else if (err == WSAECONNRESET || err == WSAECONNABORTED) {
@@ -469,31 +452,20 @@ static ssize_t send_all_to_client(int socket_fd, const char* data, size_t len)
             }
 #endif
         } else if (bytes_sent == 0) {
-            // This shouldn't happen with blocking send, but handle it
             retry_count++;
             if (retry_count > MAX_RETRIES) {
                 TraceLog(LOG_WARNING, "Send returned 0 after %d retries, sent %zu/%zu bytes", retry_count, total_sent, len);
                 return total_sent > 0 ? (ssize_t)total_sent : -1;
             }
-            int wait_ms = (retry_count < 10) ? 10 : 100; // Short wait for this case
-            usleep(wait_ms * 1000);
+            // Use poll to wait instead of usleep
+            wait_socket_writable(socket_fd, 10);
             continue;
         }
-        
+
         total_sent += bytes_sent;
-        
-        // For large transfers, yield CPU occasionally but don't reset progress
-        // if (total_sent > 0 && (total_sent % 32768) == 0 && len > 10000) {
-        //     // Log progress for large transfers
-        //     TraceLog(LOG_INFO, "Transfer progress: %zu/%zu bytes (%.1f%%)",
-        //              total_sent, len, (float)total_sent / len * 100);
-        //     usleep(1000); // Very brief yield, just 1ms
-        // }
-        
-        retry_count = 0; // Reset retry counter on successful send
+        retry_count = 0;
     }
-    
-    // TraceLog(LOG_INFO, "Successfully sent %zu bytes", total_sent);
+
     return (ssize_t)total_sent;
 }
 
@@ -714,11 +686,11 @@ static bool process_file_message(int client_index, uint8_t type, const char* dat
         if (len >= BUFFER_SIZE) len = BUFFER_SIZE - 1;
         memcpy(buffer, data, len);
         buffer[len] = '\0';
-        
+
         char* save_ptr = NULL;
         const char* sender = strtok_r(buffer, "|", &save_ptr);
         const char* file_id = strtok_r(NULL, "|", &save_ptr);
-        
+
         if (!sender || !file_id)
             return true;
 
@@ -726,6 +698,12 @@ static bool process_file_message(int client_index, uint8_t type, const char* dat
         if (session)
             file_session_remove(session);
         free(buffer);
+        return true;
+    }
+    else if (type == PACKET_TYPE_FILE_ACCEPT) {
+        // FILE_ACCEPT: Just forward to all clients so sender can start transfer
+        // Payload: sender|file_id
+        // No special server-side handling needed, just pass through
         return true;
     }
 

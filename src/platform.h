@@ -49,11 +49,30 @@
     #include <netdb.h>
     #include <fcntl.h>
     #include <sys/stat.h>
+    #include <poll.h>
 
     #define closesocket close
 
     static inline int init_network(void) { return 0; }
     static inline void cleanup_network(void) { }
 #endif
+
+// Cross-platform wait for socket writable (returns 1 if ready, 0 if timeout, -1 on error)
+static inline int wait_socket_writable(int socket_fd, int timeout_ms) {
+#ifdef _WIN32
+    fd_set write_fds;
+    struct timeval tv;
+    FD_ZERO(&write_fds);
+    FD_SET(socket_fd, &write_fds);
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    return select(socket_fd + 1, NULL, &write_fds, NULL, &tv);
+#else
+    struct pollfd pfd;
+    pfd.fd = socket_fd;
+    pfd.events = POLLOUT;
+    return poll(&pfd, 1, timeout_ms);
+#endif
+}
 
 #endif // PLATFORM_H

@@ -10,11 +10,12 @@
 #include <stdint.h>
 
 // Packet Types
-#define PACKET_TYPE_TEXT       0
-#define PACKET_TYPE_FILE_START 1
-#define PACKET_TYPE_FILE_CHUNK 2
-#define PACKET_TYPE_FILE_END   3
-#define PACKET_TYPE_FILE_ABORT 4
+#define PACKET_TYPE_TEXT        0
+#define PACKET_TYPE_FILE_START  1
+#define PACKET_TYPE_FILE_CHUNK  2
+#define PACKET_TYPE_FILE_END    3
+#define PACKET_TYPE_FILE_ABORT  4
+#define PACKET_TYPE_FILE_ACCEPT 5
 
 #pragma pack(push, 1)
 typedef struct {

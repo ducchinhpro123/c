@@ -204,9 +204,8 @@ static ssize_t send_all(int socket_fd, const char* data, size_t len)
 {
     size_t total_sent = 0;
     int retry_count = 0;
-    const int MAX_RETRIES = (len > 10000) ? 2000 : 200;
-
-    int base_wait_ms = 1;
+    const int MAX_RETRIES = 100;  // Fewer retries since we use poll() now
+    const int POLL_TIMEOUT_MS = 100;  // Wait up to 100ms for socket to be writable
 
     while (total_sent < len) {
 #ifdef _WIN32
@@ -222,24 +221,23 @@ static ssize_t send_all(int socket_fd, const char* data, size_t len)
 #else
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
 #endif
-                retry_count++;
-                if (retry_count > MAX_RETRIES) {
-                    TraceLog(LOG_ERROR, "Max retries reached while sending %zu/%zu bytes", total_sent, len);
+                // Use poll/select to wait for socket to be writable (no busy-wait)
+                int poll_result = wait_socket_writable(socket_fd, POLL_TIMEOUT_MS);
+                if (poll_result > 0) {
+                    continue;  // Socket is writable, retry immediately
+                } else if (poll_result == 0) {
+                    // Timeout
+                    retry_count++;
+                    if (retry_count > MAX_RETRIES) {
+                        TraceLog(LOG_ERROR, "Max retries reached while sending %zu/%zu bytes", total_sent, len);
+                        return -1;
+                    }
+                    continue;
+                } else {
+                    // Poll error
+                    TraceLog(LOG_ERROR, "Poll error while waiting for socket");
                     return -1;
                 }
-
-                int wait_ms = base_wait_ms;
-                if (retry_count > 100)
-                    wait_ms *= 2;
-                if (retry_count > 500)
-                    wait_ms *= 5;
-                if (retry_count > 1000)
-                    wait_ms *= 10;
-                if (wait_ms > 50)
-                    wait_ms = 50;
-
-                usleep((useconds_t)wait_ms * 1000);
-                continue;
             }
 
 #ifdef _WIN32
@@ -263,16 +261,12 @@ static ssize_t send_all(int socket_fd, const char* data, size_t len)
                 TraceLog(LOG_WARNING, "Send stalled after %d retries (%zu/%zu bytes)", retry_count, total_sent, len);
                 return total_sent > 0 ? (ssize_t)total_sent : -1;
             }
-            usleep(1000);
+            // Use poll to wait instead of usleep
+            wait_socket_writable(socket_fd, 10);
             continue;
         }
 
         total_sent += (size_t)bytes_sent;
-
-        // if (len > 65536 && (total_sent % 65536) == 0) {
-        //     TraceLog(LOG_DEBUG, "send_all progress: %zu/%zu bytes", total_sent, len);
-        // }
-
         retry_count = 0;
     }
 

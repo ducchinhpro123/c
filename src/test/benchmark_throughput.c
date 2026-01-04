@@ -41,10 +41,11 @@ size_t incoming_stream_len;
 static IncomingTransfer g_benchmark_transfer;
 static bool g_transfer_slot_used = false;
 
-// Benchmark params
+// Benchmark params - using FILE_CHUNK_SIZE from file_transfer.h
 #define BENCHMARK_FILE_SIZE (50 * 1024 * 1024) // 50 MB
-#define CHUNK_SIZE 4096
-#define FILE_ID "bench_file"
+#define CHUNK_SIZE FILE_CHUNK_SIZE             // Use the actual chunk size (1MB)
+// FILE_ID must be exactly FILE_ID_LEN (32) characters, including null terminator handling
+static char g_file_id[FILE_ID_LEN + 1] = "bench_file______________________";
 
 static size_t g_bytes_produced = 0;
 static bool g_header_sent = false;
@@ -66,7 +67,7 @@ int custom_recv_msg(ClientConnection* conn, char* buffer, int max_size) {
         // Send FILE_START packet
         // Format: FILE_START | Sender | FileID | Filename | TotalBytes | ChunkSize
         char payload[1024];
-        snprintf(payload, sizeof(payload), "Benchmark|%s|bench.bin|%d|%d", FILE_ID, BENCHMARK_FILE_SIZE, CHUNK_SIZE);
+        snprintf(payload, sizeof(payload), "Benchmark|%s|bench.bin|%d|%d", g_file_id, BENCHMARK_FILE_SIZE, CHUNK_SIZE);
         size_t payload_len = strlen(payload);
         
         uint32_t net_len = htonl(payload_len);
@@ -90,8 +91,7 @@ int custom_recv_msg(ClientConnection* conn, char* buffer, int max_size) {
     // Header + FileID + Data
     size_t data_remaining = BENCHMARK_FILE_SIZE - g_bytes_produced;
     size_t data_to_send = (data_remaining > CHUNK_SIZE) ? CHUNK_SIZE : data_remaining;
-    size_t file_id_len = strlen(FILE_ID);
-    size_t payload_len = file_id_len + data_to_send;
+    size_t payload_len = FILE_ID_LEN + data_to_send;
     
     size_t packet_size = sizeof(PacketHeader) + payload_len;
     
@@ -106,8 +106,8 @@ int custom_recv_msg(ClientConnection* conn, char* buffer, int max_size) {
     memcpy(buffer + bytes_written, &hdr, sizeof(hdr));
     bytes_written += sizeof(hdr);
     
-    memcpy(buffer + bytes_written, FILE_ID, file_id_len);
-    bytes_written += file_id_len;
+    memcpy(buffer + bytes_written, g_file_id, FILE_ID_LEN);
+    bytes_written += FILE_ID_LEN;
     
     // Fake data (random garbage/zeros)
     memset(buffer + bytes_written, 'A', data_to_send);
@@ -119,7 +119,7 @@ int custom_recv_msg(ClientConnection* conn, char* buffer, int max_size) {
 }
 
 IncomingTransfer* custom_get_incoming_transfer(const char* file_id) {
-    if (strcmp(file_id, FILE_ID) == 0 && g_transfer_slot_used) {
+    if (strncmp(file_id, g_file_id, FILE_ID_LEN) == 0 && g_transfer_slot_used) {
         return &g_benchmark_transfer;
     }
     return NULL;
@@ -187,11 +187,11 @@ int main(void) {
     free(conn);
     free(mq);
     
-    if (throughput_mb < 50.0) {
-        printf("FAIL: Throughput too low (< 50 MB/s)\n");
+    if (throughput_mb < 100.0) {
+        printf("FAIL: Throughput too low (< 100 MB/s)\n");
         return 1;
     }
-    
-    printf("SUCCESS: Throughput acceptable\n");
+
+    printf("SUCCESS: Throughput acceptable (>= 100 MB/s)\n");
     return 0;
 }

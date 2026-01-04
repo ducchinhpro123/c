@@ -71,6 +71,19 @@ int main(int argc, char **argv)
 #endif
             if (!nob_cmd_run_sync(cmd)) return 1;
 
+            nob_log(NOB_INFO, "Building test_packet_queue...");
+            cmd.count = 0;
+            nob_cmd_append(&cmd, cc);
+            nob_cmd_append(&cmd, "-Wall", "-Wextra", "-g");
+            nob_cmd_append(&cmd, "-I./src", "-I./src/test");
+            nob_cmd_append(&cmd, "-o", "build/test_packet_queue");
+            nob_cmd_append(&cmd,
+                "src/test/test_packet_queue.c",
+                "src/packet_queue.c",
+                "src/test/unity.c");
+            nob_cmd_append(&cmd, "-lpthread");
+            if (!nob_cmd_run_sync(cmd)) return 1;
+
             // Run the tests
             nob_log(NOB_INFO, "Running client logic tests...");
             cmd.count = 0;
@@ -80,6 +93,11 @@ int main(int argc, char **argv)
             nob_log(NOB_INFO, "Running file transfer tests...");
             cmd.count = 0;
             nob_cmd_append(&cmd, "./build/test_file_transfer");
+            if (!nob_cmd_run_sync(cmd)) return 1;
+
+            nob_log(NOB_INFO, "Running packet queue tests...");
+            cmd.count = 0;
+            nob_cmd_append(&cmd, "./build/test_packet_queue");
             if (!nob_cmd_run_sync(cmd)) return 1;
 
             nob_cmd_free(cmd);
@@ -175,7 +193,8 @@ int main(int argc, char **argv)
             "src/packet_queue.c",
             "src/file_transfer_state.c",
             "src/ui_components.c",
-            "src/client_logic.c");
+            "src/client_logic.c",
+            "thirdparty/tinyfiledialogs.c");
         nob_cmd_append(&cmd, "-L", raylib_lib);
         nob_cmd_append(&cmd,
             "-lraylib",
@@ -183,7 +202,9 @@ int main(int argc, char **argv)
             "-lgdi32",
             "-lwinmm",
             "-lws2_32",
-            "-lpthread");
+            "-lpthread",
+            "-lcomdlg32",
+            "-lole32");
         if (!nob_cmd_run_sync(cmd)) return 1;
 
         nob_log(NOB_INFO, "Building server (Windows)...");
@@ -214,7 +235,6 @@ int main(int argc, char **argv)
         }
     } else {
         // --- Linux Build ---
-
         nob_log(NOB_INFO, "Building client_gui (Linux)...");
         cmd.count = 0;
         nob_cmd_append(&cmd, cc);
@@ -230,7 +250,8 @@ int main(int argc, char **argv)
             "src/packet_queue.c",
             "src/file_transfer_state.c",
             "src/ui_components.c",
-            "src/client_logic.c");
+            "src/client_logic.c",
+            "thirdparty/tinyfiledialogs.c");
         nob_cmd_append(&cmd, "-L", raylib_lib);
         nob_cmd_append(&cmd, "-Wl,-rpath,$ORIGIN/../thirdparty/raylib-5.5_linux_amd64/lib");
         nob_cmd_append(&cmd, "-lraylib", "-lpthread", "-ldl", "-lrt", "-lX11", "-lm");

@@ -18,7 +18,9 @@ FAKE_VOID_FUNC(disconnect_from_server, ClientConnection*);
 FAKE_VOID_FUNC(abort_all_transfers);
 FAKE_VALUE_FUNC(IncomingTransfer*, get_incoming_transfer, const char*);
 FAKE_VALUE_FUNC(IncomingTransfer*, get_free_incoming);
+FAKE_VALUE_FUNC(OutgoingTransfer*, get_outgoing_transfer, const char*);
 FAKE_VOID_FUNC(finalize_incoming_transfer, IncomingTransfer*, bool, const char*);
+FAKE_VOID_FUNC(close_outgoing_transfer, struct ClientConnection*, OutgoingTransfer*, const char*);
 FAKE_VOID_FUNC(ensure_receive_directory);
 FAKE_VOID_FUNC(sanitize_filename, char*);
 
@@ -41,11 +43,13 @@ void setUp(void)
     RESET_FAKE(abort_all_transfers);
     RESET_FAKE(get_incoming_transfer);
     RESET_FAKE(get_free_incoming);
+    RESET_FAKE(get_outgoing_transfer);
     RESET_FAKE(finalize_incoming_transfer);
+    RESET_FAKE(close_outgoing_transfer);
     RESET_FAKE(ensure_receive_directory);
     RESET_FAKE(sanitize_filename);
     RESET_FAKE(add_message);
-    
+
     // Clear the stream buffer logic
     incoming_stream_len = 0;
 }

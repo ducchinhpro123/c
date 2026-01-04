@@ -16,7 +16,9 @@ size_t incoming_stream_len = 0;
 
 FAKE_VALUE_FUNC(IncomingTransfer*, get_incoming_transfer, const char*);
 FAKE_VALUE_FUNC(IncomingTransfer*, get_free_incoming);
+FAKE_VALUE_FUNC(OutgoingTransfer*, get_outgoing_transfer, const char*);
 FAKE_VOID_FUNC(finalize_incoming_transfer, IncomingTransfer*, bool, const char*);
+FAKE_VOID_FUNC(close_outgoing_transfer, struct ClientConnection*, OutgoingTransfer*, const char*);
 FAKE_VOID_FUNC(add_message, MessageQueue*, const char*, const char*);
 FAKE_VALUE_FUNC(int, recv_msg, ClientConnection*, char*, int);
 FAKE_VOID_FUNC(disconnect_from_server, ClientConnection*);
@@ -31,7 +33,9 @@ void setUp(void)
 {
     RESET_FAKE(get_incoming_transfer);
     RESET_FAKE(get_free_incoming);
+    RESET_FAKE(get_outgoing_transfer);
     RESET_FAKE(finalize_incoming_transfer);
+    RESET_FAKE(close_outgoing_transfer);
     RESET_FAKE(add_message);
     RESET_FAKE(recv_msg);
     RESET_FAKE(disconnect_from_server);
@@ -39,7 +43,7 @@ void setUp(void)
     RESET_FAKE(abort_all_transfers);
     RESET_FAKE(ensure_receive_directory);
     FFF_RESET_HISTORY();
-    
+
     incoming_stream_len = 0;
     memset(&g_mq, 0, sizeof(MessageQueue));
     // Reset any other global state if necessary
@@ -75,7 +79,7 @@ void test_handle_file_start_normal(void)
     
     // Assert
     TEST_ASSERT_EQUAL(1, get_free_incoming_fake.call_count);
-    TEST_ASSERT_TRUE(mock_slot.active);
+    TEST_ASSERT_EQUAL(TRANSFER_STATE_PENDING, mock_slot.state);  // Now uses state enum
     TEST_ASSERT_EQUAL_STRING("fileid123", mock_slot.file_id);
     TEST_ASSERT_EQUAL_STRING("test.txt", mock_slot.filename);
     TEST_ASSERT_EQUAL(1024, mock_slot.total_bytes);
@@ -131,7 +135,7 @@ void test_handle_file_chunk_without_start(void)
 void test_handle_file_start_duplicate_id(void)
 {
     // Arrange
-    IncomingTransfer existing_slot = { .active = true };
+    IncomingTransfer existing_slot = { .state = TRANSFER_STATE_PENDING };
     strcpy(existing_slot.file_id, "fileid123");
     get_incoming_transfer_fake.return_val = &existing_slot;
     
@@ -156,7 +160,7 @@ void test_handle_file_end_size_mismatch_under(void)
 {
     // Arrange
     IncomingTransfer slot = {
-        .active = true,
+        .state = TRANSFER_STATE_ACCEPTED,
         .total_bytes = 1000,
         .received_bytes = 500, // Under
         .fp = (FILE*)1 // Mock pointer
@@ -185,7 +189,7 @@ void test_handle_file_end_size_mismatch_under(void)
 void test_handle_file_abort(void)
 {
     // Arrange
-    IncomingTransfer slot = { .active = true };
+    IncomingTransfer slot = { .state = TRANSFER_STATE_ACCEPTED };
     strcpy(slot.file_id, "fileid123");
     get_incoming_transfer_fake.return_val = &slot;
     
@@ -212,9 +216,9 @@ void test_handle_file_chunk_over_size(void)
     // Arrange
     FILE* dev_null = fopen("/dev/null", "wb");
     TEST_ASSERT_NOT_NULL(dev_null);
-    
+
     IncomingTransfer slot = {
-        .active = true,
+        .state = TRANSFER_STATE_ACCEPTED,
         .total_bytes = 100,
         .received_bytes = 90,
         .fp = dev_null

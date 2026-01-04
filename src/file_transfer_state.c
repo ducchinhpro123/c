@@ -37,10 +37,22 @@ OutgoingTransfer* get_free_outgoing(void)
     return NULL;
 }
 
+OutgoingTransfer* get_outgoing_transfer(const char* file_id)
+{
+    if (!file_id)
+        return NULL;
+    for (int i = 0; i < MAX_ACTIVE_TRANSFERS; ++i) {
+        if (outgoing_transfers[i].active &&
+            strcmp(outgoing_transfers[i].file_id, file_id) == 0)
+            return &outgoing_transfers[i];
+    }
+    return NULL;
+}
+
 IncomingTransfer* get_free_incoming(void)
 {
     for (int i = 0; i < MAX_ACTIVE_TRANSFERS; ++i) {
-        if (!incoming_transfers[i].active)
+        if (incoming_transfers[i].state == TRANSFER_STATE_INACTIVE)
             return &incoming_transfers[i];
     }
     return NULL;
@@ -51,10 +63,102 @@ IncomingTransfer* get_incoming_transfer(const char* file_id)
     if (!file_id)
         return NULL;
     for (int i = 0; i < MAX_ACTIVE_TRANSFERS; ++i) {
-        if (incoming_transfers[i].active && strcmp(incoming_transfers[i].file_id, file_id) == 0)
+        if (incoming_transfers[i].state != TRANSFER_STATE_INACTIVE &&
+            strcmp(incoming_transfers[i].file_id, file_id) == 0)
             return &incoming_transfers[i];
     }
     return NULL;
+}
+
+IncomingTransfer* get_pending_transfer(int index)
+{
+    int count = 0;
+    for (int i = 0; i < MAX_ACTIVE_TRANSFERS; ++i) {
+        if (incoming_transfers[i].state == TRANSFER_STATE_PENDING) {
+            if (count == index)
+                return &incoming_transfers[i];
+            count++;
+        }
+    }
+    return NULL;
+}
+
+int get_pending_transfer_count(void)
+{
+    int count = 0;
+    for (int i = 0; i < MAX_ACTIVE_TRANSFERS; ++i) {
+        if (incoming_transfers[i].state == TRANSFER_STATE_PENDING)
+            count++;
+    }
+    return count;
+}
+
+void accept_incoming_transfer(IncomingTransfer* transfer, const char* save_dir)
+{
+    if (!transfer || transfer->state != TRANSFER_STATE_PENDING)
+        return;
+
+    // Store the save directory
+    if (save_dir && save_dir[0]) {
+        strncpy(transfer->save_dir, save_dir, sizeof(transfer->save_dir) - 1);
+        transfer->save_dir[sizeof(transfer->save_dir) - 1] = '\0';
+    } else {
+        strcpy(transfer->save_dir, "received");
+    }
+
+    // Ensure directory exists
+    struct stat st = { 0 };
+    if (stat(transfer->save_dir, &st) == -1) {
+#ifdef _WIN32
+        _mkdir(transfer->save_dir);
+#else
+        mkdir(transfer->save_dir, 0755);
+#endif
+    }
+
+    // Build save path
+    snprintf(transfer->save_path, sizeof(transfer->save_path), "%s/%s",
+             transfer->save_dir, transfer->filename);
+
+    // Handle duplicates
+    int duplicate_index = 1;
+    while (access(transfer->save_path, F_OK) == 0 && duplicate_index < 1000) {
+        snprintf(transfer->save_path, sizeof(transfer->save_path), "%s/%s(%d)",
+                 transfer->save_dir, transfer->filename, duplicate_index++);
+    }
+
+    // Open file for writing
+    transfer->fp = fopen(transfer->save_path, "wb");
+    if (!transfer->fp) {
+        char buf[512];
+        snprintf(buf, sizeof(buf), "Failed to open file for writing: %s", transfer->save_path);
+        add_message(&g_mq, "SYSTEM", buf);
+        transfer->state = TRANSFER_STATE_INACTIVE;
+        return;
+    }
+
+    transfer->state = TRANSFER_STATE_ACCEPTED;
+
+    char buf[512];
+    snprintf(buf, sizeof(buf), "Accepted %.200s from %.120s (%.2f MB) -> %s",
+        transfer->filename,
+        transfer->sender,
+        transfer->total_bytes / (1024.0 * 1024.0),
+        transfer->save_dir);
+    add_message(&g_mq, "SYSTEM", buf);
+}
+
+void reject_incoming_transfer(IncomingTransfer* transfer)
+{
+    if (!transfer || transfer->state != TRANSFER_STATE_PENDING)
+        return;
+
+    char buf[512];
+    snprintf(buf, sizeof(buf), "Rejected file %.200s from %.120s",
+        transfer->filename, transfer->sender);
+    add_message(&g_mq, "SYSTEM", buf);
+
+    transfer->state = TRANSFER_STATE_REJECTED;
 }
 
 void close_outgoing_transfer(struct ClientConnection* conn, OutgoingTransfer* transfer, const char* error_msg)
@@ -142,11 +246,26 @@ bool has_active_transfer(void)
         if (outgoing_transfers[i].active) {
             return true;
         }
-        if (incoming_transfers[i].active) {
+        if (incoming_transfers[i].state == TRANSFER_STATE_ACCEPTED) {
             return true;
         }
     }
     return false;
+}
+
+bool has_pending_transfer(void)
+{
+    for (int i = 0; i < MAX_ACTIVE_TRANSFERS; i++) {
+        if (incoming_transfers[i].state == TRANSFER_STATE_PENDING) {
+            return true;
+        }
+    }
+    return false;
+}
+
+char* get_default_save_directory(void)
+{
+    return "received";
 }
 
 void abort_all_transfers(void)

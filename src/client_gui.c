@@ -44,7 +44,6 @@ static bool should_scroll_to_bottom = false;
 static void start_outgoing_transfer(ClientConnection* conn, const char* file_path);
 static void pump_outgoing_transfers(ClientConnection* conn);
 static void process_file_drop(ClientConnection* conn);
-static bool ensure_transfer_buffers();
 static void ensure_asset_workdir(void);
 
 // Main function
@@ -136,6 +135,11 @@ int main()
             if (has_active_transfer()) {
                 draw_transfer_status(comic_font);
             }
+
+            // Show pending transfer dialog if any
+            if (has_pending_transfer()) {
+                draw_pending_transfers(comic_font, &conn);
+            }
         }
 
         // Display welcome mesasge at the center horizontally
@@ -184,19 +188,6 @@ static void process_file_drop(ClientConnection* conn)
     UnloadDroppedFiles(dropped_files);
 }
 
-static bool ensure_transfer_buffers()
-{
-    if (!g_chunk_buffer) g_chunk_buffer = (unsigned char*) malloc(FILE_CHUNK_SIZE);
-    if (!g_payload_buffer) g_payload_buffer = (unsigned char*) malloc(FILE_ID_LEN + FILE_CHUNK_SIZE);
-
-    if (!g_payload_buffer || !g_chunk_buffer) {
-        free(g_chunk_buffer); g_chunk_buffer = NULL;
-        free(g_payload_buffer); g_payload_buffer = NULL;
-        return false;
-    }
-    return true;
-}
-
 static void pump_outgoing_transfers(ClientConnection* conn)
 {
     char message_buffer[256 + FILE_ID_LEN + 8];
@@ -204,20 +195,17 @@ static void pump_outgoing_transfers(ClientConnection* conn)
     if (!conn->connected)
         return;
 
-    const size_t MAX_QUEUE_SIZE = 10 * 1024 * 1024;
-    if (pq_get_data_size(&conn->queue) > MAX_QUEUE_SIZE) {
-        return; 
+    const size_t MAX_QUEUE_SIZE = 32 * 1024 * 1024;  // Increased to 32MB for larger chunks
+    size_t current_queue_size = pq_get_data_size(&conn->queue);
+    if (current_queue_size > MAX_QUEUE_SIZE) {
+        return;
     }
 
     if (!has_active_transfer()) return;
 
-    if (!ensure_transfer_buffers()) {
-        TraceLog(LOG_ERROR, "Failed to allocate persistent buffers for file transfer");
-        return;
-    }
-
-    unsigned char* chunk_buffer = g_chunk_buffer;
-    unsigned char* payload_buffer = g_payload_buffer;
+    // Time-based throttling: spend up to TRANSFER_PUMP_BUDGET_MS per frame
+    double start_time = GetTime();
+    double budget_seconds = TRANSFER_PUMP_BUDGET_MS / 1000.0;
 
     for (int i = 0; i < MAX_ACTIVE_TRANSFERS; ++i) {
         OutgoingTransfer* t = &outgoing_transfers[i];
@@ -232,32 +220,56 @@ static void pump_outgoing_transfers(ClientConnection* conn)
 
             send_packet(conn, PACKET_TYPE_FILE_START, meta, (uint32_t)strlen(meta));
             t->meta_sent = true;
+            // Now wait for FILE_ACCEPT from receiver
+            continue;
         }
 
-        int chunks_sent_this_frame = 0;
+        // Wait for receiver to accept before sending chunks
+        if (!t->accepted) {
+            // Still waiting for acceptance - don't send chunks yet
+            continue;
+        }
 
-        while (t->sent_bytes < t->total_bytes && chunks_sent_this_frame < MAX_CHUNKS_PER_FRAME) {
-            if (pq_get_data_size(&conn->queue) > MAX_QUEUE_SIZE)
+        // Use time-based budget instead of fixed chunk count
+        while (t->sent_bytes < t->total_bytes) {
+            // Check time budget
+            if ((GetTime() - start_time) > budget_seconds)
+                break;
+
+            // Check queue size (less frequently with cached value)
+            current_queue_size = pq_get_data_size(&conn->queue);
+            if (current_queue_size > MAX_QUEUE_SIZE)
                 break;
 
             size_t remaining = t->total_bytes - t->sent_bytes;
-            // Whether to read amount of chunk_size of read the whole remaining
             size_t to_read = (remaining > t->chunk_size) ? t->chunk_size : remaining;
 
-            size_t read_count = fread(chunk_buffer, 1, to_read, t->fp);
-            if (read_count > 0) {
-                memcpy(payload_buffer, t->file_id, FILE_ID_LEN);
-                memcpy(payload_buffer + FILE_ID_LEN, chunk_buffer, read_count);
+            // Allocate payload buffer for zero-copy transfer
+            uint32_t payload_len = (uint32_t)(FILE_ID_LEN + to_read);
+            unsigned char* payload = (unsigned char*)malloc(payload_len);
+            if (!payload) {
+                TraceLog(LOG_ERROR, "Failed to allocate payload buffer");
+                break;
+            }
 
-                if (send_packet(conn, PACKET_TYPE_FILE_CHUNK, payload_buffer, (uint32_t)(FILE_ID_LEN + read_count)) == 0) {
+            // Copy file_id header
+            memcpy(payload, t->file_id, FILE_ID_LEN);
+
+            // Read directly into payload buffer (avoiding double copy)
+            size_t read_count = fread(payload + FILE_ID_LEN, 1, to_read, t->fp);
+            if (read_count > 0) {
+                // Zero-copy push: queue takes ownership of payload
+                if (pq_push_zero_copy(&conn->queue, PACKET_TYPE_FILE_CHUNK, payload, (uint32_t)(FILE_ID_LEN + read_count)) == 0) {
                     t->sent_bytes += read_count;
                     t->next_chunk_index++;
-                    chunks_sent_this_frame++;
                 } else {
                     TraceLog(LOG_ERROR, "Failed to send file chunk");
+                    free(payload);
                     fseek(t->fp, -((long)read_count), SEEK_CUR);
-                    break; 
+                    break;
                 }
+            } else {
+                free(payload);
             }
 
             if (read_count < to_read) {

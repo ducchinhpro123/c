@@ -88,3 +88,35 @@ size_t pq_get_data_size(PacketQueue* pq) {
     pthread_mutex_unlock(&pq->mutex);
     return size;
 }
+
+size_t pq_get_data_size_unlocked(PacketQueue* pq) {
+    return pq->total_data_size;
+}
+
+// Zero-copy push: takes ownership of data pointer (caller must have malloc'd it)
+int pq_push_zero_copy(PacketQueue* pq, uint8_t type, void* data, uint32_t length) {
+    Packet* pkt = (Packet*)malloc(sizeof(Packet));
+    if (!pkt) return -1;
+
+    pkt->type = type;
+    pkt->length = length;
+    pkt->next = NULL;
+    pkt->data = data;  // Take ownership, no copy
+
+    pthread_mutex_lock(&pq->mutex);
+
+    if (pq->tail) {
+        pq->tail->next = pkt;
+        pq->tail = pkt;
+    } else {
+        pq->head = pkt;
+        pq->tail = pkt;
+    }
+
+    pq->count++;
+    pq->total_data_size += length;
+
+    pthread_cond_signal(&pq->cond);
+    pthread_mutex_unlock(&pq->mutex);
+    return 0;
+}
