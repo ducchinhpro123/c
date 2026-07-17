@@ -8,6 +8,12 @@ void init_message_queue(MessageQueue* q)
     pthread_mutex_init(&q->mutex, NULL);
 }
 
+void destroy_message_queue(MessageQueue* q)
+{
+    if (q)
+        pthread_mutex_destroy(&q->mutex);
+}
+
 void add_message(MessageQueue* q, const char* sender, const char* text)
 {
     pthread_mutex_lock(&q->mutex);

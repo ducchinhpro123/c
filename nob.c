@@ -202,6 +202,7 @@ int main(int argc, char **argv)
             "-lgdi32",
             "-lwinmm",
             "-lws2_32",
+            "-lbcrypt",
             "-lpthread",
             "-lcomdlg32",
             "-lole32");
@@ -226,6 +227,7 @@ int main(int argc, char **argv)
             "-lgdi32",
             "-lwinmm",
             "-lws2_32",
+            "-lbcrypt",
             "-lpthread");
         if (!nob_cmd_run_sync(cmd)) return 1;
 

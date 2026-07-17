@@ -21,17 +21,28 @@
 // Helper function: Send all data, handling partial sends and EAGAIN
 static ssize_t send_all(int socket_fd, const char* data, size_t len);
 
+static bool set_socket_nonblocking(int socket_fd)
+{
+#ifdef _WIN32
+    u_long mode = 1;
+    return ioctlsocket(socket_fd, FIONBIO, &mode) == 0;
+#else
+    int flags = fcntl(socket_fd, F_GETFL, 0);
+    return flags >= 0 && fcntl(socket_fd, F_SETFL, flags | O_NONBLOCK) == 0;
+#endif
+}
+
 // Sender thread function
 static void* sender_thread_func(void* arg)
 {
     ClientConnection* conn = (ClientConnection*)arg;
 
-    while (conn->connected || conn->queue.count > 0) {
+    for (;;) {
         Packet* pkt = pq_pop(&conn->queue);
         if (!pkt)
-            continue;
+            break;
 
-        if (conn->connected && conn->socket_fd != -1) {
+        if (atomic_load(&conn->connected) && conn->socket_fd != -1) {
             PacketHeader header;
             header.type = pkt->type;
             header.length = htonl(pkt->length);
@@ -39,12 +50,14 @@ static void* sender_thread_func(void* arg)
             // Send header
             if (send_all(conn->socket_fd, (const char*)&header, sizeof(header)) != sizeof(header)) {
                 TraceLog(LOG_ERROR, "Failed to send packet header in thread");
-                conn->connected = false;
+                atomic_store(&conn->connected, false);
+                pq_close(&conn->queue);
             } else if (pkt->length > 0 && pkt->data != NULL) {
                 // Send body
                 if (send_all(conn->socket_fd, (const char*)pkt->data, pkt->length) != (ssize_t)pkt->length) {
                     TraceLog(LOG_ERROR, "Failed to send packet body in thread");
-                    conn->connected = false;
+                    atomic_store(&conn->connected, false);
+                    pq_close(&conn->queue);
                 }
             }
         }
@@ -57,7 +70,8 @@ static void* sender_thread_func(void* arg)
 void init_client_connection(ClientConnection* conn)
 {
     conn->socket_fd = -1;
-    conn->connected = false;
+    atomic_init(&conn->connected, false);
+    conn->sender_thread_started = false;
     memset(conn->username, 0, sizeof(conn->username));
     pq_init(&conn->queue);
 }
@@ -102,10 +116,13 @@ static void optimize_socket_for_lan(int socket_fd)
 
 int connect_to_server(ClientConnection* conn, const char* host, const char* port, const char* username)
 {
+    if (!conn || !host || host[0] == '\0' || !port || port[0] == '\0' || !protocol_username_is_valid(username) || atomic_load(&conn->connected) || conn->sender_thread_started || conn->socket_fd != -1)
+        return -1;
+
     struct addrinfo hints, *res, *p;
     memset(&hints, 0, sizeof(hints));
 
-    hints.ai_family = AF_INET;
+    hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
     int status = getaddrinfo(host, port, &hints, &res);
@@ -124,7 +141,44 @@ int connect_to_server(ClientConnection* conn, const char* host, const char* port
 #endif
             continue;
         }
-        if (connect(conn->socket_fd, p->ai_addr, p->ai_addrlen) == -1) {
+        if (!set_socket_nonblocking(conn->socket_fd)) {
+            closesocket(conn->socket_fd);
+            conn->socket_fd = -1;
+            continue;
+        }
+
+        int connect_result = connect(conn->socket_fd, p->ai_addr, p->ai_addrlen);
+        bool connecting = false;
+#ifdef _WIN32
+        if (connect_result == -1) {
+            int connect_error = WSAGetLastError();
+            connecting = connect_error == WSAEWOULDBLOCK || connect_error == WSAEINPROGRESS;
+        }
+#else
+        if (connect_result == -1)
+            connecting = errno == EINPROGRESS;
+#endif
+
+        if (connect_result == -1 && connecting) {
+            int socket_error = 0;
+            socklen_t error_len = sizeof(socket_error);
+            int ready = wait_socket_writable(conn->socket_fd, 3000);
+            if (ready <= 0 || getsockopt(conn->socket_fd, SOL_SOCKET, SO_ERROR,
+#ifdef _WIN32
+                                  (char*)&socket_error,
+#else
+                                  &socket_error,
+#endif
+                                  &error_len)
+                    != 0
+                || socket_error != 0) {
+                connect_result = -1;
+            } else {
+                connect_result = 0;
+            }
+        }
+
+        if (connect_result == -1) {
 #ifdef _WIN32
             TraceLog(LOG_INFO, "connect failed. Continue searching: WSA error %d", WSAGetLastError());
             closesocket(conn->socket_fd);
@@ -132,6 +186,7 @@ int connect_to_server(ClientConnection* conn, const char* host, const char* port
             TraceLog(LOG_INFO, "connect failed. Continue searching: %s", strerror(errno));
             close(conn->socket_fd);
 #endif
+            conn->socket_fd = -1;
             continue;
         }
 
@@ -145,56 +200,35 @@ int connect_to_server(ClientConnection* conn, const char* host, const char* port
     }
 
     freeaddrinfo(res);
-    conn->connected = true;
+    pq_reopen(&conn->queue);
+    atomic_store(&conn->connected, true);
     // set username
     snprintf(conn->username, sizeof(conn->username), "%s", username);
 
     // Optimize socket for LAN speed
     optimize_socket_for_lan(conn->socket_fd);
 
-    // set non-blocking mode
-#ifdef _WIN32
-    u_long iMode = 1;
-    ioctlsocket(conn->socket_fd, FIONBIO, &iMode);
-#else
-    int flags = fcntl(conn->socket_fd, F_GETFL, 0);
-    fcntl(conn->socket_fd, F_SETFL, flags | O_NONBLOCK);
-#endif
+    // Start sender thread
+    if (pthread_create(&conn->sender_thread, NULL, sender_thread_func, conn) != 0) {
+        TraceLog(LOG_ERROR, "Failed to create sender thread");
+        atomic_store(&conn->connected, false);
+        closesocket(conn->socket_fd);
+        conn->socket_fd = -1;
+        return -1;
+    }
+    conn->sender_thread_started = true;
 
-    // Send username handshake to server
-    if (conn->username[0] != '\0') {
-        char handshake[300];
-        snprintf(handshake, sizeof(handshake), "USERNAME:%s", conn->username);
-        if (send_msg(conn, handshake) < 0) {
-#ifdef _WIN32
-            TraceLog(LOG_WARNING, "Failed to send username handshake: WSA error %d", WSAGetLastError());
-#else
-            TraceLog(LOG_WARNING, "Failed to send username handshake: %s", strerror(errno));
-#endif
-        } else {
-            TraceLog(LOG_INFO, "Sent username handshake for '%s'", conn->username);
-        }
+    // The first text packet is a bounded username handshake. The server never
+    // trusts sender names embedded in later chat messages.
+    char handshake[sizeof(conn->username) + 10];
+    snprintf(handshake, sizeof(handshake), "USERNAME:%s", conn->username);
+    if (send_msg(conn, handshake) < 0) {
+        TraceLog(LOG_WARNING, "Failed to queue username handshake");
+        disconnect_from_server(conn);
+        return -1;
     }
 
     TraceLog(LOG_INFO, "Connected to %s:%s", host, port);
-
-    // Function signature for references
-    /* extern int pthread_create (pthread_t *__restrict __newthread, */
-    /* 			   const pthread_attr_t *__restrict __attr, */
-    /* 			   void *(*__start_routine) (void *), */
-    /* 			   void *__restrict __arg) __THROWNL __nonnull ((1, 3)); */
-    // Start sender thread
-    // When a client connects to the server, a dedicated sender thread is spawned
-    if (pthread_create(&conn->sender_thread, NULL, sender_thread_func, conn) != 0) {
-        TraceLog(LOG_ERROR, "Failed to create sender thread");
-        conn->connected = false;
-#ifdef _WIN32
-        closesocket(conn->socket_fd);
-#else
-        close(conn->socket_fd);
-#endif
-        return -1;
-    }
 
     return 0;
 }
@@ -204,8 +238,8 @@ static ssize_t send_all(int socket_fd, const char* data, size_t len)
 {
     size_t total_sent = 0;
     int retry_count = 0;
-    const int MAX_RETRIES = 100;  // Fewer retries since we use poll() now
-    const int POLL_TIMEOUT_MS = 100;  // Wait up to 100ms for socket to be writable
+    const int MAX_RETRIES = 20;
+    const int POLL_TIMEOUT_MS = 100; // Wait up to 100ms for socket to be writable
 
     while (total_sent < len) {
 #ifdef _WIN32
@@ -224,7 +258,7 @@ static ssize_t send_all(int socket_fd, const char* data, size_t len)
                 // Use poll/select to wait for socket to be writable (no busy-wait)
                 int poll_result = wait_socket_writable(socket_fd, POLL_TIMEOUT_MS);
                 if (poll_result > 0) {
-                    continue;  // Socket is writable, retry immediately
+                    continue; // Socket is writable, retry immediately
                 } else if (poll_result == 0) {
                     // Timeout
                     retry_count++;
@@ -275,8 +309,19 @@ static ssize_t send_all(int socket_fd, const char* data, size_t len)
 
 int send_packet(ClientConnection* conn, uint8_t type, const void* data, uint32_t length)
 {
-    if (!conn->connected) {
+    if (!conn || !atomic_load(&conn->connected)) {
         TraceLog(LOG_ERROR, "No connection");
+        return -1;
+    }
+
+    if (!protocol_packet_is_valid(type, length) || (length > 0 && !data)) {
+        TraceLog(LOG_ERROR, "Refusing invalid packet type=%u length=%u", type, length);
+        return -1;
+    }
+
+    // Bound queued network data even if a caller forgets to throttle.
+    if (pq_get_data_size(&conn->queue) + length > 64u * 1024u * 1024u) {
+        TraceLog(LOG_WARNING, "Outgoing queue is full");
         return -1;
     }
 
@@ -290,12 +335,24 @@ int send_packet(ClientConnection* conn, uint8_t type, const void* data, uint32_t
 // Send a message, use PACKET_TYPE_TEXT
 int send_msg(ClientConnection* conn, const char* msg)
 {
-    return send_packet(conn, PACKET_TYPE_TEXT, msg, (uint32_t)strlen(msg));
+    if (!msg)
+        return -1;
+    size_t len = strnlen(msg, PROTOCOL_TEXT_MAX_LEN + 1u);
+    if (!protocol_text_is_valid(msg, len))
+        return -1;
+    return send_packet(conn, PACKET_TYPE_TEXT, msg, (uint32_t)len);
 }
 
 int recv_msg(ClientConnection* conn, char* buffer, int size)
 {
-    ssize_t bytes_recv = recv(conn->socket_fd, buffer, size, 0);
+    if (!conn || !buffer || size < 2 || conn->socket_fd == -1)
+        return -1;
+
+#ifdef _WIN32
+    ssize_t bytes_recv = recv(conn->socket_fd, buffer, size - 1, 0);
+#else
+    ssize_t bytes_recv = recv(conn->socket_fd, buffer, (size_t)(size - 1), 0);
+#endif
     if (bytes_recv < 0) {
 #ifdef _WIN32
         int err = WSAGetLastError();
@@ -309,26 +366,46 @@ int recv_msg(ClientConnection* conn, char* buffer, int size)
         }
         TraceLog(LOG_ERROR, "Recv failed: %s", strerror(errno));
 #endif
-        conn->connected = false;
+        atomic_store(&conn->connected, false);
         return -1;
     }
 
     if (bytes_recv == 0) {
         TraceLog(LOG_ERROR, "Server closed connection");
-        conn->connected = false;
-        closesocket(conn->socket_fd);
+        atomic_store(&conn->connected, false);
         return -1;
     }
 
     buffer[bytes_recv] = '\0';
-    return bytes_recv;
+    return (int)bytes_recv;
 }
 
 void disconnect_from_server(ClientConnection* conn)
 {
-    if (conn->connected || conn->socket_fd != -1) {
-        conn->connected = false;
-        conn->socket_fd = -1;
-        TraceLog(LOG_INFO, "Disconnected");
+    if (!conn)
+        return;
+
+    bool was_connected = atomic_exchange(&conn->connected, false);
+    pq_close(&conn->queue);
+
+    if (conn->socket_fd != -1) {
+#ifdef _WIN32
+        shutdown(conn->socket_fd, SD_BOTH);
+#else
+        shutdown(conn->socket_fd, SHUT_RDWR);
+#endif
     }
+
+    if (conn->sender_thread_started && !pthread_equal(pthread_self(), conn->sender_thread)) {
+        pthread_join(conn->sender_thread, NULL);
+        conn->sender_thread_started = false;
+    }
+
+    if (conn->socket_fd != -1) {
+        closesocket(conn->socket_fd);
+        conn->socket_fd = -1;
+    }
+
+    if (was_connected)
+        TraceLog(LOG_INFO, "Disconnected");
 }

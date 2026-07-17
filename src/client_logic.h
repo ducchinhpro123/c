@@ -8,6 +8,7 @@
 bool update_client_state(ClientConnection* conn, MessageQueue* mq);
 
 // Exposed for testing if needed
-void process_incoming_stream(MessageQueue* mq, const char* data, size_t len);
+bool process_incoming_stream(MessageQueue* mq, const char* data, size_t len);
+void reset_client_stream(void);
 
 #endif

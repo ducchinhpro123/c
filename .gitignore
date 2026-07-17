@@ -1,4 +1,8 @@
 # Ignore built executables
+/nob
+/build/*
+!/build/raylib.dll
+!/build/libwinpthread-1.dll
 /client_gui
 /server_gui
 /server
@@ -7,6 +11,7 @@
 /Docs
 *.log
 *.bak
+*.plist
 server_gui
 client_gui
 server

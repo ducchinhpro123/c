@@ -2,34 +2,22 @@
 #define CLIENT_NETWORK_H
 
 #include "platform.h"
+#include "protocol.h"
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #ifndef _WIN32
-    #include <sys/types.h>
+#include <sys/types.h>
 #endif
 
-// Packet Types
-#define PACKET_TYPE_TEXT        0
-#define PACKET_TYPE_FILE_START  1
-#define PACKET_TYPE_FILE_CHUNK  2
-#define PACKET_TYPE_FILE_END    3
-#define PACKET_TYPE_FILE_ABORT  4
-#define PACKET_TYPE_FILE_ACCEPT 5
-
-#pragma pack(push, 1)
-typedef struct {
-    uint8_t type;
-    uint32_t length; // Network Byte Order
-} PacketHeader;
-#pragma pack(pop)
-
-#include <pthread.h>
 #include "packet_queue.h"
+#include <pthread.h>
 
 typedef struct ClientConnection {
     int socket_fd;
-    bool connected;
-    char username[256];
+    atomic_bool connected;
+    bool sender_thread_started;
+    char username[PROTOCOL_USERNAME_MAX_LEN + 1];
     PacketQueue queue;
     pthread_t sender_thread;
 } ClientConnection;

@@ -3,20 +3,20 @@
 
 #include <raylib.h>
 
+#include "client_logic.h"
 #include "client_network.h"
 #include "file_transfer.h"
 #include "file_transfer_state.h"
-#include "ui_components.h"
-#include <inttypes.h>
 #include "message.h"
 #include "packet_queue.h"
+#include "ui_components.h"
 #include "warning_dialog.h"
 #include "window.h"
 #include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "client_logic.h"
 
 // Raygui implementation is now in ui_components.c or shared, but main might need it if using directly
 // We moved implementation to ui_components.c to avoid dupes
@@ -25,13 +25,6 @@
 #define USERNAME_BUFFER 64
 #define FILENAME_TRUNCATE_THRESHOLD 25
 #define MAX_USERNAME_LENGTH 24
-
-Message messages[MAX_MESSAGES];
-
-// For buffering
-// Buffers
-static unsigned char* g_chunk_buffer = NULL;
-static unsigned char* g_payload_buffer = NULL;
 
 MessageQueue g_mq = { 0 }; // Init message queue
 
@@ -56,13 +49,14 @@ int main()
 
     ensure_asset_workdir();
 
-    const char* window_title = "C&F";
+    const char* window_title = "Relay - private LAN chat and file transfer";
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, window_title);
     SetTargetFPS(FPS);
-    Font comic_font = LoadFont("resources/fonts/ComicMono.ttf");
-    Font welcome_font = LoadFont("resources/fonts/Hack-Bold.ttf");
+    Font comic_font = LoadFontEx("resources/fonts/Inter-VariableFont_opsz,wght.ttf", 32, NULL, 0);
+    init_ui_theme();
+    GuiSetFont(comic_font);
 
-    char server_ip[16] = "127.0.0.1";
+    char server_ip[256] = "127.0.0.1";
     int server_port = 8898;
     char port_str[6] = "8898";
     char username[USERNAME_BUFFER];
@@ -81,38 +75,17 @@ int main()
     ensure_receive_directory();
     scan_received_folder();
 
-    Image anime_left = LoadImage("resources/anime.png");
-    Image anime_right = LoadImage("resources/anime2.png");
-    ImageResize(&anime_left, 350, 230);
-    ImageResize(&anime_right, 390, 430);
-
-    /* ImageDrawPixel(&anime, 100, 100, RED); */
-
-    Texture2D animeTex_left = LoadTextureFromImage(anime_left);
-    Texture2D animeTex_right = LoadTextureFromImage(anime_right);
-    UnloadImage(anime_left);
-    UnloadImage(anime_right);
-
     while (!WindowShouldClose()) {
-        ClearBackground(RAYWHITE);
-
         BeginDrawing();
+        ClearBackground((Color) { 245, 247, 251, 255 });
 
         if (!is_connected) {
             introduction_window(comic_font);
             connection_screen(&server_port, server_ip, port_str, username, &is_connected, &conn);
-            DrawTexture(animeTex_left, 
-                    100,
-                    (GetScreenHeight() - animeTex_left.height) / 2,
-                    WHITE);
-
-            DrawTexture(animeTex_right, 
-                    800,
-                    ((GetScreenHeight() - animeTex_right.height) / 2) + 100,
-                    WHITE);
         }
 
         if (is_connected) {
+            welcome_msg(comic_font);
             panel_scroll_msg(comic_font, &g_mq, &should_scroll_to_bottom);
             text_input(&conn, username, &g_mq, &should_scroll_to_bottom);
 
@@ -120,11 +93,11 @@ int main()
                 should_scroll_to_bottom = true;
             }
 
-            if (!conn.connected) {
+            if (!atomic_load(&conn.connected)) {
                 is_connected = false;
-                // update_client_state handles disconnect_from_server and abort_all_transfers internally if recv fails
-                // But we check conn.connected to switch UI
-                show_error("Connection lost"); 
+                abort_all_transfers();
+                disconnect_from_server(&conn);
+                show_error("Connection lost");
             }
 
             files_displaying(comic_font);
@@ -142,15 +115,9 @@ int main()
             }
         }
 
-        // Display welcome mesasge at the center horizontally
-        welcome_msg(welcome_font);
-
-        setting_button();
-
         debugging_button(&debugging);
         if (debugging) {
             show_fps();
-            debug_mq(&g_mq);
         }
 
         draw_warning_dialog();
@@ -158,14 +125,12 @@ int main()
         EndDrawing();
     }
 
-    free(g_chunk_buffer); g_chunk_buffer = NULL;
-    free(g_payload_buffer); g_payload_buffer = NULL;
-
-    UnloadFont(welcome_font);
     UnloadFont(comic_font);
-    UnloadTexture(animeTex_left);
-    UnloadTexture(animeTex_right);
 
+    abort_all_transfers();
+    disconnect_from_server(&conn);
+    pq_destroy(&conn.queue);
+    destroy_message_queue(&g_mq);
     cleanup_network();
     CloseWindow();
     return 0;
@@ -192,16 +157,17 @@ static void pump_outgoing_transfers(ClientConnection* conn)
 {
     char message_buffer[256 + FILE_ID_LEN + 8];
 
-    if (!conn->connected)
+    if (!atomic_load(&conn->connected))
         return;
 
-    const size_t MAX_QUEUE_SIZE = 32 * 1024 * 1024;  // Increased to 32MB for larger chunks
+    const size_t MAX_QUEUE_SIZE = 32 * 1024 * 1024; // Increased to 32MB for larger chunks
     size_t current_queue_size = pq_get_data_size(&conn->queue);
     if (current_queue_size > MAX_QUEUE_SIZE) {
         return;
     }
 
-    if (!has_active_transfer()) return;
+    if (!has_active_transfer())
+        return;
 
     // Time-based throttling: spend up to TRANSFER_PUMP_BUDGET_MS per frame
     double start_time = GetTime();
@@ -299,7 +265,7 @@ static void start_outgoing_transfer(ClientConnection* conn, const char* file_pat
     if (!conn || !file_path)
         return;
 
-    if (!conn->connected) {
+    if (!atomic_load(&conn->connected)) {
         show_error("Connect before sending files");
         return;
     }
@@ -331,7 +297,7 @@ static void start_outgoing_transfer(ClientConnection* conn, const char* file_pat
     memset(slot, 0, sizeof(*slot));
     slot->active = true;
     slot->fp = fp;
-    slot->total_bytes = (size_t)st.st_size; 
+    slot->total_bytes = (size_t)st.st_size;
     slot->chunk_size = FILE_CHUNK_SIZE;
     slot->sent_bytes = 0;
     slot->next_chunk_index = 0;
@@ -349,12 +315,20 @@ static void start_outgoing_transfer(ClientConnection* conn, const char* file_pat
         slot->sender[len] = '\0';
     }
 
-    const char* base_name = strrchr(file_path, '/');
+    const char* forward_slash = strrchr(file_path, '/');
+    const char* back_slash = strrchr(file_path, '\\');
+    const char* base_name = forward_slash;
+    if (!base_name || (back_slash && back_slash > base_name))
+        base_name = back_slash;
     base_name = base_name ? base_name + 1 : file_path;
     strncpy(slot->filename, base_name, sizeof(slot->filename) - 1);
     sanitize_filename(slot->filename);
 
-    generate_file_id(slot->file_id, sizeof(slot->file_id));
+    if (!generate_file_id(slot->file_id, sizeof(slot->file_id))) {
+        close_outgoing_transfer(NULL, slot, NULL);
+        show_error("Could not create a secure transfer ID");
+        return;
+    }
 
     char buf[512];
     snprintf(buf, sizeof(buf), "Sending %s (%.2f MB)", slot->filename, slot->total_bytes / (1024.0 * 1024.0));
@@ -363,15 +337,15 @@ static void start_outgoing_transfer(ClientConnection* conn, const char* file_pat
 
 static void ensure_asset_workdir(void)
 {
-    if (FileExists("resources/fonts/ComicMono.ttf"))
+    if (FileExists("resources/fonts/Inter-VariableFont_opsz,wght.ttf"))
         return;
-    #ifdef _WIN32
-        _chdir("..");
-    #else
-        chdir("..");
-    #endif
+#ifdef _WIN32
+    _chdir("..");
+#else
+    chdir("..");
+#endif
 
-    if (!FileExists("resources/fonts/ComicMono.ttf")) {
+    if (!FileExists("resources/fonts/Inter-VariableFont_opsz,wght.ttf")) {
         TraceLog(LOG_ERROR, "Asset directory not found: expected resources/fonts near executable");
     }
 }

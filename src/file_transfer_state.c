@@ -42,8 +42,7 @@ OutgoingTransfer* get_outgoing_transfer(const char* file_id)
     if (!file_id)
         return NULL;
     for (int i = 0; i < MAX_ACTIVE_TRANSFERS; ++i) {
-        if (outgoing_transfers[i].active &&
-            strcmp(outgoing_transfers[i].file_id, file_id) == 0)
+        if (outgoing_transfers[i].active && strcmp(outgoing_transfers[i].file_id, file_id) == 0)
             return &outgoing_transfers[i];
     }
     return NULL;
@@ -63,8 +62,7 @@ IncomingTransfer* get_incoming_transfer(const char* file_id)
     if (!file_id)
         return NULL;
     for (int i = 0; i < MAX_ACTIVE_TRANSFERS; ++i) {
-        if (incoming_transfers[i].state != TRANSFER_STATE_INACTIVE &&
-            strcmp(incoming_transfers[i].file_id, file_id) == 0)
+        if (incoming_transfers[i].state != TRANSFER_STATE_INACTIVE && strcmp(incoming_transfers[i].file_id, file_id) == 0)
             return &incoming_transfers[i];
     }
     return NULL;
@@ -110,28 +108,38 @@ void accept_incoming_transfer(IncomingTransfer* transfer, const char* save_dir)
     struct stat st = { 0 };
     if (stat(transfer->save_dir, &st) == -1) {
 #ifdef _WIN32
-        _mkdir(transfer->save_dir);
+        if (_mkdir(transfer->save_dir) != 0) {
 #else
-        mkdir(transfer->save_dir, 0755);
+        if (mkdir(transfer->save_dir, 0700) != 0) {
 #endif
+            add_message(&g_mq, "SYSTEM", "Could not create the selected receive folder");
+            transfer->state = TRANSFER_STATE_INACTIVE;
+            return;
+        }
+    } else if (!S_ISDIR(st.st_mode)) {
+        add_message(&g_mq, "SYSTEM", "The selected receive location is not a folder");
+        transfer->state = TRANSFER_STATE_INACTIVE;
+        return;
     }
 
-    // Build save path
-    snprintf(transfer->save_path, sizeof(transfer->save_path), "%s/%s",
-             transfer->save_dir, transfer->filename);
+    // Exclusive creation avoids a check/open race and refuses to follow an
+    // existing symlink supplied through the receive directory.
+    for (int duplicate_index = 0; duplicate_index < 1000; ++duplicate_index) {
+        int path_len = duplicate_index == 0
+            ? snprintf(transfer->save_path, sizeof(transfer->save_path), "%s/%s",
+                  transfer->save_dir, transfer->filename)
+            : snprintf(transfer->save_path, sizeof(transfer->save_path), "%s/%s(%d)",
+                  transfer->save_dir, transfer->filename, duplicate_index);
+        if (path_len < 0 || (size_t)path_len >= sizeof(transfer->save_path))
+            break;
 
-    // Handle duplicates
-    int duplicate_index = 1;
-    while (access(transfer->save_path, F_OK) == 0 && duplicate_index < 1000) {
-        snprintf(transfer->save_path, sizeof(transfer->save_path), "%s/%s(%d)",
-                 transfer->save_dir, transfer->filename, duplicate_index++);
+        transfer->fp = fopen(transfer->save_path, "wbx");
+        if (transfer->fp || errno != EEXIST)
+            break;
     }
-
-    // Open file for writing
-    transfer->fp = fopen(transfer->save_path, "wb");
     if (!transfer->fp) {
         char buf[512];
-        snprintf(buf, sizeof(buf), "Failed to open file for writing: %s", transfer->save_path);
+        snprintf(buf, sizeof(buf), "Failed to open file for writing: %.450s", transfer->save_path);
         add_message(&g_mq, "SYSTEM", buf);
         transfer->state = TRANSFER_STATE_INACTIVE;
         return;
@@ -140,10 +148,10 @@ void accept_incoming_transfer(IncomingTransfer* transfer, const char* save_dir)
     transfer->state = TRANSFER_STATE_ACCEPTED;
 
     char buf[512];
-    snprintf(buf, sizeof(buf), "Accepted %.200s from %.120s (%.2f MB) -> %s",
+    snprintf(buf, sizeof(buf), "Accepted %.200s from %.40s (%.2f MB) -> %.160s",
         transfer->filename,
         transfer->sender,
-        transfer->total_bytes / (1024.0 * 1024.0),
+        (double)transfer->total_bytes / (1024.0 * 1024.0),
         transfer->save_dir);
     add_message(&g_mq, "SYSTEM", buf);
 }
@@ -177,11 +185,12 @@ void close_outgoing_transfer(struct ClientConnection* conn, OutgoingTransfer* tr
 
     if (error_msg && *error_msg) {
         if (conn && transfer->file_id[0] != '\0') {
-            size_t abort_len = strlen("FILE_ABORT|||") + strlen(transfer->sender) + strlen(transfer->file_id) + strlen(error_msg) + 1;
+            size_t abort_len = strlen("|||") + strlen(transfer->sender) + strlen(transfer->file_id) + strlen(error_msg);
             char* abort_msg = (char*)malloc(abort_len);
             if (abort_msg) {
-                snprintf(abort_msg, abort_len, "FILE_ABORT|%s|%s|%s", transfer->sender, transfer->file_id, error_msg);
-                send_msg((ClientConnection*)conn, abort_msg);
+                snprintf(abort_msg, abort_len, "%s|%s|%s", transfer->sender, transfer->file_id, error_msg);
+                send_packet((ClientConnection*)conn, PACKET_TYPE_FILE_ABORT,
+                    abort_msg, (uint32_t)strlen(abort_msg));
                 free(abort_msg);
             }
         }
@@ -225,7 +234,7 @@ void finalize_incoming_transfer(IncomingTransfer* transfer, bool success, const 
         snprintf(buf, sizeof(buf), "Received file %.200s from %.120s (%.2f MB)",
             filename_copy[0] ? filename_copy : "file",
             sender_copy[0] ? sender_copy : "peer",
-            total_bytes_copy / (1024.0 * 1024.0));
+            (double)total_bytes_copy / (1024.0 * 1024.0));
         add_message(&g_mq, "SYSTEM", buf);
         // Rescan received folder
         scan_received_folder();
@@ -271,8 +280,10 @@ char* get_default_save_directory(void)
 void abort_all_transfers(void)
 {
     for (int i = 0; i < MAX_ACTIVE_TRANSFERS; ++i) {
-        close_outgoing_transfer(NULL, &outgoing_transfers[i], "connection closed");
-        finalize_incoming_transfer(&incoming_transfers[i], false, "connection closed");
+        if (outgoing_transfers[i].active)
+            close_outgoing_transfer(NULL, &outgoing_transfers[i], "connection closed");
+        if (incoming_transfers[i].state != TRANSFER_STATE_INACTIVE)
+            finalize_incoming_transfer(&incoming_transfers[i], false, "connection closed");
     }
     incoming_stream_len = 0;
 }
@@ -284,7 +295,7 @@ void ensure_receive_directory(void)
 #ifdef _WIN32
         _mkdir("received"); // Windows: no mode parameter
 #else
-        mkdir("received", 0755); // Linux: with permissions
+        mkdir("received", 0700); // Files received from peers are private by default.
 #endif
     }
 }
@@ -339,6 +350,11 @@ void scan_received_folder(void)
 
 void remove_selected_file(const char* filepath)
 {
+    if (!filepath || filepath[0] == '\0' || strcmp(filepath, ".") == 0 || strcmp(filepath, "..") == 0 || strchr(filepath, '/') || strchr(filepath, '\\')) {
+        TraceLog(LOG_WARNING, "Refusing unsafe received-file path");
+        return;
+    }
+
     char full_filepath[512];
 #ifdef _WIN32
     snprintf(full_filepath, sizeof(full_filepath), "received\\%s", filepath);

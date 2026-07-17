@@ -1,12 +1,12 @@
-#include "unity.h"
 #include "packet_queue.h"
-#include <string.h>
-#include <stdlib.h>
+#include "unity.h"
 #include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
-void setUp(void) {}
-void tearDown(void) {}
+void setUp(void) { }
+void tearDown(void) { }
 
 void test_pq_init(void)
 {
@@ -66,7 +66,7 @@ void test_pq_push_zero_copy(void)
     // Data pointer should be the same (zero-copy)
     TEST_ASSERT_EQUAL_PTR(data, pkt->data);
 
-    pq_free_packet(pkt);  // This frees the original data
+    pq_free_packet(pkt); // This frees the original data
 }
 
 void test_pq_multiple_packets_fifo(void)
@@ -140,6 +140,23 @@ void test_pq_empty_data(void)
     TEST_ASSERT_NULL(pkt->data);
 
     pq_free_packet(pkt);
+}
+
+void test_pq_close_and_reopen(void)
+{
+    PacketQueue pq;
+    pq_init(&pq);
+
+    pq_close(&pq);
+    TEST_ASSERT_NULL(pq_pop(&pq));
+    TEST_ASSERT_EQUAL(-1, pq_push(&pq, 1, "blocked", 7));
+
+    pq_reopen(&pq);
+    TEST_ASSERT_EQUAL(0, pq_push(&pq, 1, "ok", 2));
+    Packet* pkt = pq_pop(&pq);
+    TEST_ASSERT_NOT_NULL(pkt);
+    pq_free_packet(pkt);
+    pq_destroy(&pq);
 }
 
 // Thread function for producer
@@ -248,7 +265,7 @@ void test_pq_push_performance(void)
 
     double push_rate = NUM_ITERATIONS / push_time;
     printf("\nPush performance: %.0f packets/sec (%.2f MB/s)\n",
-           push_rate, (push_rate * PACKET_SIZE) / (1024 * 1024));
+        push_rate, (push_rate * PACKET_SIZE) / (1024 * 1024));
 
     // Pop all
     start = get_time_sec();
@@ -260,7 +277,7 @@ void test_pq_push_performance(void)
 
     double pop_rate = NUM_ITERATIONS / pop_time;
     printf("Pop performance: %.0f packets/sec (%.2f MB/s)\n",
-           pop_rate, (pop_rate * PACKET_SIZE) / (1024 * 1024));
+        pop_rate, (pop_rate * PACKET_SIZE) / (1024 * 1024));
 
     free(data);
 
@@ -275,12 +292,12 @@ void test_pq_zero_copy_performance(void)
     pq_init(&pq);
 
     const int NUM_ITERATIONS = 1000;
-    const size_t PACKET_SIZE = 1024 * 1024;  // 1MB packets
+    const size_t PACKET_SIZE = 1024 * 1024; // 1MB packets
 
     double start = get_time_sec();
     for (int i = 0; i < NUM_ITERATIONS; i++) {
         void* data = malloc(PACKET_SIZE);
-        memset(data, 'A', PACKET_SIZE);  // Simulate filling buffer
+        memset(data, 'A', PACKET_SIZE); // Simulate filling buffer
         pq_push_zero_copy(&pq, 1, data, PACKET_SIZE);
     }
     double push_time = get_time_sec() - start;
@@ -307,6 +324,7 @@ int main(void)
     RUN_TEST(test_pq_multiple_packets_fifo);
     RUN_TEST(test_pq_get_data_size);
     RUN_TEST(test_pq_empty_data);
+    RUN_TEST(test_pq_close_and_reopen);
     RUN_TEST(test_pq_concurrent_producers);
     RUN_TEST(test_pq_large_packet);
     RUN_TEST(test_pq_push_performance);

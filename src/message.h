@@ -1,10 +1,11 @@
 #ifndef MESSAGE_H
 #define MESSAGE_H
 
-#include <stdbool.h>
+#include "protocol.h"
 #include <pthread.h>
+#include <stdbool.h>
 
-#define MSG_BUFFER 1500000  // Must match BUFFER_SIZE in server.h for file packets
+#define MSG_BUFFER (PROTOCOL_TEXT_MAX_LEN + 1)
 #define MAX_MESSAGES 200
 
 typedef struct {
@@ -20,6 +21,7 @@ typedef struct {
 } MessageQueue;
 
 void init_message_queue(MessageQueue* queue);
+void destroy_message_queue(MessageQueue* queue);
 void add_message(MessageQueue* queue, const char* sender, const char* text);
 Message get_message(MessageQueue* queue, int index);
 int get_message_count(MessageQueue* queue);
