@@ -22,6 +22,7 @@
 // We moved implementation to ui_components.c to avoid dupes
 
 #define FPS 60
+#define UI_FONT_BASE_SIZE 64
 #define USERNAME_BUFFER 64
 #define FILENAME_TRUNCATE_THRESHOLD 25
 #define MAX_USERNAME_LENGTH 24
@@ -52,7 +53,11 @@ int main()
     const char* window_title = "Relay - private LAN chat and file transfer";
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, window_title);
     SetTargetFPS(FPS);
-    Font comic_font = LoadFontEx("resources/fonts/Inter-VariableFont_opsz,wght.ttf", 32, NULL, 0);
+    // Rasterize above the largest text size used by the UI. A smaller atlas gets
+    // visibly pixelated when the 54 px welcome heading scales it up.
+    Font comic_font = LoadFontEx(
+        "resources/fonts/Inter-VariableFont_opsz,wght.ttf", UI_FONT_BASE_SIZE, NULL, 0);
+    SetTextureFilter(comic_font.texture, TEXTURE_FILTER_BILINEAR);
     init_ui_theme();
     GuiSetFont(comic_font);
 
