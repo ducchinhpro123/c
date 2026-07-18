@@ -2,7 +2,7 @@
 
 Relay is a small desktop chat and file-transfer app for trusted local networks. A lightweight C server relays framed TCP packets between raylib clients; recipients explicitly approve files before anything is written to disk.
 
-![Relay connection screen](docs/images/relay-connect.png)
+![Relay connection screen](docs/images/relay-connect-sharp.png)
 
 *Connect to a Relay server on your local network, then chat and transfer files from the desktop client.*
 
