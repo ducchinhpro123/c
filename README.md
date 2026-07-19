@@ -1,6 +1,6 @@
 # Relay
 
-Relay is a small desktop chat and file-transfer app for trusted local networks. A lightweight C server relays framed TCP packets between raylib clients; recipients explicitly approve files before anything is written to disk.
+Relay is a small desktop chat and file-transfer app for trusted local networks. A lightweight C server applies workspace policy over a typed v2 wire protocol; every invited participant independently approves or declines a file before bytes are delivered.
 
 ![Relay connection screen](docs/images/relay-connect-sharp.png)
 
@@ -10,13 +10,14 @@ Relay is a small desktop chat and file-transfer app for trusted local networks. 
 
 - LAN chat with server-authored sender identities
 - Drag-and-drop file transfer up to 500 MB per file
-- Explicit accept/reject flow and exclusive file creation
+- Broadcast File Offers with independent accept/reject decisions
+- Atomic Received Files: partial data stays hidden and is removed on failure
 - Linux builds and Windows cross-builds from Linux
 - Bounded packet sizes, queues, connection counts, and transfer slots
 
 ## Security model
 
-Relay is intended for a **trusted LAN**. Traffic is not encrypted and there is no password or cryptographic peer authentication, so do not expose port `8898` to the public internet. The implementation rejects malformed/oversized packets, validates usernames and metadata, uses OS-provided secure randomness for transfer IDs, and sanitizes received filenames.
+Relay is intended for a **trusted LAN**. Traffic is not encrypted and there is no password or cryptographic peer authentication, so do not expose port `8898` to the public internet. The implementation rejects malformed or oversized typed messages, validates display names and metadata, uses server-assigned participant and offer identities, uses OS randomness for client correlation IDs, and sanitizes received filenames.
 
 For use across an untrusted network, run Relay through a trusted VPN or add authenticated TLS before deployment.
 
@@ -67,21 +68,21 @@ The resulting `client_gui.exe`, `server.exe`, and runtime DLLs are placed in `bu
 ## Project layout
 
 ```text
-src/client_gui.c           application loop and transfer pump
-src/ui_components.c       raylib/raygui interface
-src/client_network.c       connection and sender-thread lifecycle
-src/client_logic.c         framed-packet parser and handlers
-src/server.c               relay server and protocol enforcement
-src/protocol.h             shared wire limits and validation
-src/file_transfer_state.c  incoming/outgoing transfer lifecycle
-src/test/                  Unity tests and throughput benchmark
+src/client_gui.c       application loop and interface wiring
+src/ui_components.c   raylib/raygui interface
+src/client_network.c   opaque connection, delivery queue, and sender thread
+src/file_transfer.c    File Offer, File Transfer, Delivery, and Received File lifecycle
+src/protocol.c         shared typed v2 codec, framing, bounds, and validation
+src/relay_policy.c     deterministic workspace and relay policy
+src/server.c           nonblocking socket adapter for Relay policy
+src/test/              interface-level Unity tests
 ```
 
 Received files are stored in `received/` by default. That directory and generated build artifacts are intentionally ignored by Git.
 
 ## Verification
 
-The test suite covers stream backpressure, malformed packet rejection, file metadata and size handling, filename sanitization, secure transfer-ID formatting, queue lifecycle, concurrency, and throughput. Run it before submitting changes:
+The test suite covers fragmented and coalesced frames, malformed-message rejection, frozen Recipient Sets, Offer Window expiry, independent Delivery failures, sender disconnects, atomic Received Files, partial cleanup, and backpressure retry. Run it before submitting changes:
 
 ```console
 ./nob test

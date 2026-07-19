@@ -1,25 +1,147 @@
-#include "client_network.h"
 #include "platform.h"
+#include "client_network.h"
+
 #include <errno.h>
-// #include <fcntl.h>
-// #include <netdb.h>
-// #include <netinet/in.h>
-// #include <netinet/tcp.h>
 #include <pthread.h>
-#include <raylib.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
 #ifdef _WIN32
 #include <io.h>
 #else
 #include <unistd.h>
 #endif
 
-#include "packet_queue.h"
+#define CLIENT_OUTBOUND_MAX_BYTES (32u * 1024u * 1024u)
+#define CLIENT_RECEIVE_CHUNK (64u * 1024u)
 
-// Helper function: Send all data, handling partial sends and EAGAIN
-static ssize_t send_all(int socket_fd, const char* data, size_t len);
+typedef struct FrameNode {
+    uint8_t* bytes;
+    size_t length;
+    struct FrameNode* next;
+} FrameNode;
+
+typedef struct {
+    FrameNode* head;
+    FrameNode* tail;
+    size_t bytes;
+    bool closed;
+    pthread_mutex_t mutex;
+    pthread_cond_t available;
+} FrameQueue;
+
+struct ClientConnection {
+    int socket_fd;
+    atomic_bool connected;
+    bool sender_thread_started;
+    pthread_t sender_thread;
+    FrameQueue outbound;
+    ProtocolDecoder decoder;
+    char display_name[PROTOCOL_DISPLAY_NAME_MAX + 1u];
+    atomic_uint_fast64_t participant_id;
+};
+
+static void frame_queue_init(FrameQueue* queue)
+{
+    memset(queue, 0, sizeof(*queue));
+    pthread_mutex_init(&queue->mutex, NULL);
+    pthread_cond_init(&queue->available, NULL);
+}
+
+static void frame_node_destroy(FrameNode* node)
+{
+    if (!node)
+        return;
+    free(node->bytes);
+    free(node);
+}
+
+static RelaySendResult frame_queue_push(FrameQueue* queue, uint8_t* bytes, size_t length)
+{
+    FrameNode* node = malloc(sizeof(*node));
+    if (!node)
+        return RELAY_SEND_ERROR;
+    node->bytes = bytes;
+    node->length = length;
+    node->next = NULL;
+
+    pthread_mutex_lock(&queue->mutex);
+    RelaySendResult result = RELAY_SEND_OK;
+    if (queue->closed) {
+        result = RELAY_SEND_CLOSED;
+    } else if (length > CLIENT_OUTBOUND_MAX_BYTES - queue->bytes) {
+        result = RELAY_SEND_BACKPRESSURE;
+    } else {
+        if (queue->tail)
+            queue->tail->next = node;
+        else
+            queue->head = node;
+        queue->tail = node;
+        queue->bytes += length;
+        pthread_cond_signal(&queue->available);
+    }
+    pthread_mutex_unlock(&queue->mutex);
+
+    if (result != RELAY_SEND_OK)
+        free(node);
+    return result;
+}
+
+static FrameNode* frame_queue_pop(FrameQueue* queue)
+{
+    pthread_mutex_lock(&queue->mutex);
+    while (!queue->head && !queue->closed)
+        pthread_cond_wait(&queue->available, &queue->mutex);
+    FrameNode* node = queue->head;
+    if (node) {
+        queue->head = node->next;
+        if (!queue->head)
+            queue->tail = NULL;
+        queue->bytes -= node->length;
+    }
+    pthread_mutex_unlock(&queue->mutex);
+    return node;
+}
+
+static void frame_queue_close(FrameQueue* queue)
+{
+    pthread_mutex_lock(&queue->mutex);
+    queue->closed = true;
+    pthread_cond_broadcast(&queue->available);
+    pthread_mutex_unlock(&queue->mutex);
+}
+
+static void frame_queue_reopen(FrameQueue* queue)
+{
+    pthread_mutex_lock(&queue->mutex);
+    queue->closed = false;
+    pthread_mutex_unlock(&queue->mutex);
+}
+
+static void frame_queue_discard(FrameQueue* queue)
+{
+    pthread_mutex_lock(&queue->mutex);
+    FrameNode* node = queue->head;
+    queue->head = NULL;
+    queue->tail = NULL;
+    queue->bytes = 0;
+    pthread_mutex_unlock(&queue->mutex);
+    while (node) {
+        FrameNode* next = node->next;
+        frame_node_destroy(node);
+        node = next;
+    }
+}
+
+static void frame_queue_destroy(FrameQueue* queue)
+{
+    frame_queue_close(queue);
+    frame_queue_discard(queue);
+    pthread_mutex_destroy(&queue->mutex);
+    pthread_cond_destroy(&queue->available);
+}
 
 static bool set_socket_nonblocking(int socket_fd)
 {
@@ -32,380 +154,328 @@ static bool set_socket_nonblocking(int socket_fd)
 #endif
 }
 
-// Sender thread function
-static void* sender_thread_func(void* arg)
+static void optimize_socket_for_lan(int socket_fd)
 {
-    ClientConnection* conn = (ClientConnection*)arg;
+#ifdef _WIN32
+    char nodelay = 1;
+    int buffer_size = 8 * 1024 * 1024;
+    (void)setsockopt(socket_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+    (void)setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, (char*)&buffer_size, sizeof(buffer_size));
+    (void)setsockopt(socket_fd, SOL_SOCKET, SO_RCVBUF, (char*)&buffer_size, sizeof(buffer_size));
+#else
+    int nodelay = 1;
+    int buffer_size = 8 * 1024 * 1024;
+    (void)setsockopt(socket_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+    (void)setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, &buffer_size, sizeof(buffer_size));
+    (void)setsockopt(socket_fd, SOL_SOCKET, SO_RCVBUF, &buffer_size, sizeof(buffer_size));
+#endif
+}
 
-    for (;;) {
-        Packet* pkt = pq_pop(&conn->queue);
-        if (!pkt)
-            break;
-
-        if (atomic_load(&conn->connected) && conn->socket_fd != -1) {
-            PacketHeader header;
-            header.type = pkt->type;
-            header.length = htonl(pkt->length);
-
-            // Send header
-            if (send_all(conn->socket_fd, (const char*)&header, sizeof(header)) != sizeof(header)) {
-                TraceLog(LOG_ERROR, "Failed to send packet header in thread");
-                atomic_store(&conn->connected, false);
-                pq_close(&conn->queue);
-            } else if (pkt->length > 0 && pkt->data != NULL) {
-                // Send body
-                if (send_all(conn->socket_fd, (const char*)pkt->data, pkt->length) != (ssize_t)pkt->length) {
-                    TraceLog(LOG_ERROR, "Failed to send packet body in thread");
-                    atomic_store(&conn->connected, false);
-                    pq_close(&conn->queue);
-                }
-            }
+static ssize_t send_all(int socket_fd, const uint8_t* bytes, size_t length)
+{
+    size_t sent = 0;
+    unsigned stalled = 0;
+    while (sent < length) {
+#ifdef _WIN32
+        ssize_t result = send(socket_fd, (const char*)bytes + sent, (int)(length - sent), 0);
+#else
+        ssize_t result = send(socket_fd, bytes + sent, length - sent, MSG_NOSIGNAL);
+#endif
+        if (result > 0) {
+            sent += (size_t)result;
+            stalled = 0;
+            continue;
         }
+        if (result == 0) {
+            if (++stalled > 20)
+                return -1;
+            (void)wait_socket_writable(socket_fd, 100);
+            continue;
+        }
+#ifdef _WIN32
+        int error = WSAGetLastError();
+        if (error == WSAEWOULDBLOCK) {
+#else
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+#endif
+            if (wait_socket_writable(socket_fd, 100) > 0)
+                continue;
+            if (++stalled <= 20)
+                continue;
+        }
+        return -1;
+    }
+    return (ssize_t)sent;
+}
 
-        pq_free_packet(pkt);
+static void* sender_thread_main(void* argument)
+{
+    ClientConnection* connection = argument;
+    for (;;) {
+        FrameNode* frame = frame_queue_pop(&connection->outbound);
+        if (!frame)
+            break;
+        if (atomic_load(&connection->connected)
+            && send_all(connection->socket_fd, frame->bytes, frame->length)
+                != (ssize_t)frame->length) {
+            atomic_store(&connection->connected, false);
+            frame_queue_close(&connection->outbound);
+        }
+        frame_node_destroy(frame);
     }
     return NULL;
 }
 
-void init_client_connection(ClientConnection* conn)
+ClientConnection* client_connection_create(void)
 {
-    conn->socket_fd = -1;
-    atomic_init(&conn->connected, false);
-    conn->sender_thread_started = false;
-    memset(conn->username, 0, sizeof(conn->username));
-    pq_init(&conn->queue);
+    ClientConnection* connection = calloc(1, sizeof(*connection));
+    if (!connection)
+        return NULL;
+    connection->socket_fd = -1;
+    atomic_init(&connection->connected, false);
+    atomic_init(&connection->participant_id, 0);
+    frame_queue_init(&connection->outbound);
+    protocol_decoder_init(&connection->decoder);
+    return connection;
 }
 
-// Helper: Set socket options for high-speed LAN transfer
-static void optimize_socket_for_lan(int socket_fd)
+void client_connection_destroy(ClientConnection* connection)
 {
-    int pr = 8;
-    // Disable Nagle's algorithm for immediate sending
-#ifdef _WIN32
-    char flag = 1; // Windows uses char* instead of int*
-    if (setsockopt(socket_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
-#else
-    int flag = 1;
-    if (setsockopt(socket_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
-#endif
-        TraceLog(LOG_WARNING, "Failed to set TCP_NODELAY");
-    }
-
-#ifdef _WIN32
-    int sendbuf_size = pr * 1024 * 1024;
-    if (setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, (char*)&sendbuf_size, sizeof(sendbuf_size)) < 0) {
-#else
-    int sendbuf_size = pr * 1024 * 1024;
-    if (setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, &sendbuf_size, sizeof(sendbuf_size)) < 0) {
-#endif
-        TraceLog(LOG_WARNING, "Failed to set SO_SNDBUF");
-    }
-
-#ifdef _WIN32
-    int recvbuf_size = pr * 1024 * 1024;
-    if (setsockopt(socket_fd, SOL_SOCKET, SO_RCVBUF, (char*)&recvbuf_size, sizeof(recvbuf_size)) < 0) {
-#else
-    int recvbuf_size = pr * 1024 * 1024;
-    if (setsockopt(socket_fd, SOL_SOCKET, SO_RCVBUF, &recvbuf_size, sizeof(recvbuf_size)) < 0) {
-#endif
-        TraceLog(LOG_WARNING, "Failed to set SO_RCVBUF");
-    }
-
-    TraceLog(LOG_INFO, "Socket optimized for LAN: TCP_NODELAY, %dMB buffers", pr);
+    if (!connection)
+        return;
+    disconnect_from_server(connection);
+    protocol_decoder_destroy(&connection->decoder);
+    frame_queue_destroy(&connection->outbound);
+    free(connection);
 }
 
-int connect_to_server(ClientConnection* conn, const char* host, const char* port, const char* username)
+int connect_to_server(ClientConnection* connection, const char* host, const char* port,
+    const char* display_name)
 {
-    if (!conn || !host || host[0] == '\0' || !port || port[0] == '\0' || !protocol_username_is_valid(username) || atomic_load(&conn->connected) || conn->sender_thread_started || conn->socket_fd != -1)
+    if (!connection || !host || !port || !protocol_display_name_is_valid(display_name)
+        || atomic_load(&connection->connected) || connection->sender_thread_started
+        || connection->socket_fd != -1)
         return -1;
 
-    struct addrinfo hints, *res, *p;
+    struct addrinfo hints;
+    struct addrinfo* addresses = NULL;
     memset(&hints, 0, sizeof(hints));
-
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-
-    int status = getaddrinfo(host, port, &hints, &res);
-    if (status != 0) {
-        TraceLog(LOG_ERROR, "getaddrinfo failed: %s", gai_strerror(status));
+    if (getaddrinfo(host, port, &hints, &addresses) != 0)
         return -1;
-    }
 
-    for (p = res; p != NULL; p = p->ai_next) {
-        conn->socket_fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (conn->socket_fd == -1) {
-#ifdef _WIN32
-            TraceLog(LOG_INFO, "socket failed. Continue searching: WSA error %d", WSAGetLastError());
-#else
-            TraceLog(LOG_INFO, "socket failed. Continue searching: %s", strerror(errno));
-#endif
+    struct addrinfo* address = NULL;
+    for (address = addresses; address; address = address->ai_next) {
+        connection->socket_fd = socket(address->ai_family, address->ai_socktype, address->ai_protocol);
+        if (connection->socket_fd == -1)
+            continue;
+        if (!set_socket_nonblocking(connection->socket_fd)) {
+            closesocket(connection->socket_fd);
+            connection->socket_fd = -1;
             continue;
         }
-        if (!set_socket_nonblocking(conn->socket_fd)) {
-            closesocket(conn->socket_fd);
-            conn->socket_fd = -1;
-            continue;
-        }
-
-        int connect_result = connect(conn->socket_fd, p->ai_addr, p->ai_addrlen);
-        bool connecting = false;
+        int result = connect(connection->socket_fd, address->ai_addr, address->ai_addrlen);
+        bool in_progress = false;
 #ifdef _WIN32
-        if (connect_result == -1) {
-            int connect_error = WSAGetLastError();
-            connecting = connect_error == WSAEWOULDBLOCK || connect_error == WSAEINPROGRESS;
+        if (result == -1) {
+            int error = WSAGetLastError();
+            in_progress = error == WSAEWOULDBLOCK || error == WSAEINPROGRESS;
         }
 #else
-        if (connect_result == -1)
-            connecting = errno == EINPROGRESS;
+        if (result == -1)
+            in_progress = errno == EINPROGRESS;
 #endif
-
-        if (connect_result == -1 && connecting) {
+        if (result == -1 && in_progress) {
             int socket_error = 0;
-            socklen_t error_len = sizeof(socket_error);
-            int ready = wait_socket_writable(conn->socket_fd, 3000);
-            if (ready <= 0 || getsockopt(conn->socket_fd, SOL_SOCKET, SO_ERROR,
+            socklen_t error_length = sizeof(socket_error);
+            int ready = wait_socket_writable(connection->socket_fd, 3000);
+            if (ready > 0 && getsockopt(connection->socket_fd, SOL_SOCKET, SO_ERROR,
 #ifdef _WIN32
-                                  (char*)&socket_error,
+                    (char*)&socket_error,
 #else
-                                  &socket_error,
+                    &socket_error,
 #endif
-                                  &error_len)
-                    != 0
-                || socket_error != 0) {
-                connect_result = -1;
-            } else {
-                connect_result = 0;
-            }
+                    &error_length) == 0
+                && socket_error == 0)
+                result = 0;
         }
-
-        if (connect_result == -1) {
-#ifdef _WIN32
-            TraceLog(LOG_INFO, "connect failed. Continue searching: WSA error %d", WSAGetLastError());
-            closesocket(conn->socket_fd);
-#else
-            TraceLog(LOG_INFO, "connect failed. Continue searching: %s", strerror(errno));
-            close(conn->socket_fd);
-#endif
-            conn->socket_fd = -1;
-            continue;
-        }
-
-        break;
+        if (result == 0)
+            break;
+        closesocket(connection->socket_fd);
+        connection->socket_fd = -1;
     }
+    freeaddrinfo(addresses);
+    if (!address)
+        return -1;
 
-    if (p == NULL) {
-        TraceLog(LOG_ERROR, "Failed to connect to any address!");
-        freeaddrinfo(res);
+    optimize_socket_for_lan(connection->socket_fd);
+    frame_queue_discard(&connection->outbound);
+    frame_queue_reopen(&connection->outbound);
+    protocol_decoder_reset(&connection->decoder);
+    atomic_store(&connection->participant_id, 0);
+    snprintf(connection->display_name, sizeof(connection->display_name), "%s", display_name);
+    atomic_store(&connection->connected, true);
+
+    if (pthread_create(&connection->sender_thread, NULL, sender_thread_main, connection) != 0) {
+        atomic_store(&connection->connected, false);
+        closesocket(connection->socket_fd);
+        connection->socket_fd = -1;
+        frame_queue_close(&connection->outbound);
         return -1;
     }
+    connection->sender_thread_started = true;
 
-    freeaddrinfo(res);
-    pq_reopen(&conn->queue);
-    atomic_store(&conn->connected, true);
-    // set username
-    snprintf(conn->username, sizeof(conn->username), "%s", username);
-
-    // Optimize socket for LAN speed
-    optimize_socket_for_lan(conn->socket_fd);
-
-    // Start sender thread
-    if (pthread_create(&conn->sender_thread, NULL, sender_thread_func, conn) != 0) {
-        TraceLog(LOG_ERROR, "Failed to create sender thread");
-        atomic_store(&conn->connected, false);
-        closesocket(conn->socket_fd);
-        conn->socket_fd = -1;
-        return -1;
-    }
-    conn->sender_thread_started = true;
-
-    // The first text packet is a bounded username handshake. The server never
-    // trusts sender names embedded in later chat messages.
-    char handshake[sizeof(conn->username) + 10];
-    snprintf(handshake, sizeof(handshake), "USERNAME:%s", conn->username);
-    if (send_msg(conn, handshake) < 0) {
-        TraceLog(LOG_WARNING, "Failed to queue username handshake");
-        disconnect_from_server(conn);
-        return -1;
-    }
-
-    TraceLog(LOG_INFO, "Connected to %s:%s", host, port);
-
-    return 0;
-}
-
-// Helper function: Send all data, handling partial sends and EAGAIN
-static ssize_t send_all(int socket_fd, const char* data, size_t len)
-{
-    size_t total_sent = 0;
-    int retry_count = 0;
-    const int MAX_RETRIES = 20;
-    const int POLL_TIMEOUT_MS = 100; // Wait up to 100ms for socket to be writable
-
-    while (total_sent < len) {
-#ifdef _WIN32
-        ssize_t bytes_sent = send(socket_fd, data + total_sent, (int)(len - total_sent), 0);
-#else
-        ssize_t bytes_sent = send(socket_fd, data + total_sent, len - total_sent, MSG_NOSIGNAL);
-#endif
-
-        if (bytes_sent < 0) {
-#ifdef _WIN32
-            int err = WSAGetLastError();
-            if (err == WSAEWOULDBLOCK) {
-#else
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-#endif
-                // Use poll/select to wait for socket to be writable (no busy-wait)
-                int poll_result = wait_socket_writable(socket_fd, POLL_TIMEOUT_MS);
-                if (poll_result > 0) {
-                    continue; // Socket is writable, retry immediately
-                } else if (poll_result == 0) {
-                    // Timeout
-                    retry_count++;
-                    if (retry_count > MAX_RETRIES) {
-                        TraceLog(LOG_ERROR, "Max retries reached while sending %zu/%zu bytes", total_sent, len);
-                        return -1;
-                    }
-                    continue;
-                } else {
-                    // Poll error
-                    TraceLog(LOG_ERROR, "Poll error while waiting for socket");
-                    return -1;
-                }
-            }
-
-#ifdef _WIN32
-            if (err == WSAECONNRESET || err == WSAECONNABORTED) {
-                TraceLog(LOG_WARNING, "Connection closed while sending after %zu/%zu bytes", total_sent, len);
-                return -1;
-            }
-            TraceLog(LOG_ERROR, "Send error after %zu/%zu bytes: WSA error %d", total_sent, len, err);
-#else
-            if (errno == EPIPE || errno == ECONNRESET) {
-                TraceLog(LOG_WARNING, "Connection closed while sending after %zu/%zu bytes", total_sent, len);
-                return -1;
-            }
-
-            TraceLog(LOG_ERROR, "Send error after %zu/%zu bytes: %s", total_sent, len, strerror(errno));
-#endif
-            return -1;
-        } else if (bytes_sent == 0) {
-            retry_count++;
-            if (retry_count > MAX_RETRIES) {
-                TraceLog(LOG_WARNING, "Send stalled after %d retries (%zu/%zu bytes)", retry_count, total_sent, len);
-                return total_sent > 0 ? (ssize_t)total_sent : -1;
-            }
-            // Use poll to wait instead of usleep
-            wait_socket_writable(socket_fd, 10);
-            continue;
-        }
-
-        total_sent += (size_t)bytes_sent;
-        retry_count = 0;
-    }
-
-    return (ssize_t)total_sent;
-}
-
-int send_packet(ClientConnection* conn, uint8_t type, const void* data, uint32_t length)
-{
-    if (!conn || !atomic_load(&conn->connected)) {
-        TraceLog(LOG_ERROR, "No connection");
-        return -1;
-    }
-
-    if (!protocol_packet_is_valid(type, length) || (length > 0 && !data)) {
-        TraceLog(LOG_ERROR, "Refusing invalid packet type=%u length=%u", type, length);
-        return -1;
-    }
-
-    // Bound queued network data even if a caller forgets to throttle.
-    if (pq_get_data_size(&conn->queue) + length > 64u * 1024u * 1024u) {
-        TraceLog(LOG_WARNING, "Outgoing queue is full");
-        return -1;
-    }
-
-    if (pq_push(&conn->queue, type, data, length) != 0) {
-        TraceLog(LOG_ERROR, "Failed to push packet to queue (memory full?)");
+    RelayMessage hello = { .type = RELAY_MESSAGE_HELLO };
+    hello.as.hello.version = PROTOCOL_VERSION;
+    snprintf(hello.as.hello.display_name, sizeof(hello.as.hello.display_name), "%s", display_name);
+    if (client_connection_send(connection, &hello) != RELAY_SEND_OK) {
+        disconnect_from_server(connection);
         return -1;
     }
     return 0;
 }
 
-// Send a message, use PACKET_TYPE_TEXT
-int send_msg(ClientConnection* conn, const char* msg)
+void disconnect_from_server(ClientConnection* connection)
 {
-    if (!msg)
-        return -1;
-    size_t len = strnlen(msg, PROTOCOL_TEXT_MAX_LEN + 1u);
-    if (!protocol_text_is_valid(msg, len))
-        return -1;
-    return send_packet(conn, PACKET_TYPE_TEXT, msg, (uint32_t)len);
-}
-
-int recv_msg(ClientConnection* conn, char* buffer, int size)
-{
-    if (!conn || !buffer || size < 2 || conn->socket_fd == -1)
-        return -1;
-
-#ifdef _WIN32
-    ssize_t bytes_recv = recv(conn->socket_fd, buffer, size - 1, 0);
-#else
-    ssize_t bytes_recv = recv(conn->socket_fd, buffer, (size_t)(size - 1), 0);
-#endif
-    if (bytes_recv < 0) {
-#ifdef _WIN32
-        int err = WSAGetLastError();
-        if (err == WSAEWOULDBLOCK) {
-            return 0;
-        }
-        TraceLog(LOG_ERROR, "Recv failed: WSA error %d", err);
-#else
-        if (errno == EWOULDBLOCK || errno == EAGAIN) {
-            return 0;
-        }
-        TraceLog(LOG_ERROR, "Recv failed: %s", strerror(errno));
-#endif
-        atomic_store(&conn->connected, false);
-        return -1;
-    }
-
-    if (bytes_recv == 0) {
-        TraceLog(LOG_ERROR, "Server closed connection");
-        atomic_store(&conn->connected, false);
-        return -1;
-    }
-
-    buffer[bytes_recv] = '\0';
-    return (int)bytes_recv;
-}
-
-void disconnect_from_server(ClientConnection* conn)
-{
-    if (!conn)
+    if (!connection)
         return;
-
-    bool was_connected = atomic_exchange(&conn->connected, false);
-    pq_close(&conn->queue);
-
-    if (conn->socket_fd != -1) {
+    atomic_store(&connection->connected, false);
+    frame_queue_close(&connection->outbound);
+    if (connection->socket_fd != -1) {
 #ifdef _WIN32
-        shutdown(conn->socket_fd, SD_BOTH);
+        (void)shutdown(connection->socket_fd, SD_BOTH);
 #else
-        shutdown(conn->socket_fd, SHUT_RDWR);
+        (void)shutdown(connection->socket_fd, SHUT_RDWR);
 #endif
     }
-
-    if (conn->sender_thread_started && !pthread_equal(pthread_self(), conn->sender_thread)) {
-        pthread_join(conn->sender_thread, NULL);
-        conn->sender_thread_started = false;
+    if (connection->sender_thread_started
+        && !pthread_equal(pthread_self(), connection->sender_thread)) {
+        pthread_join(connection->sender_thread, NULL);
+        connection->sender_thread_started = false;
     }
-
-    if (conn->socket_fd != -1) {
-        closesocket(conn->socket_fd);
-        conn->socket_fd = -1;
+    if (connection->socket_fd != -1) {
+        closesocket(connection->socket_fd);
+        connection->socket_fd = -1;
     }
+    frame_queue_discard(&connection->outbound);
+    protocol_decoder_reset(&connection->decoder);
+    atomic_store(&connection->participant_id, 0);
+}
 
-    if (was_connected)
-        TraceLog(LOG_INFO, "Disconnected");
+bool client_connection_is_connected(const ClientConnection* connection)
+{
+    return connection && atomic_load(&connection->connected);
+}
+
+uint64_t client_connection_participant_id(const ClientConnection* connection)
+{
+    return connection ? atomic_load(&connection->participant_id) : 0;
+}
+
+const char* client_connection_display_name(const ClientConnection* connection)
+{
+    return connection ? connection->display_name : "";
+}
+
+RelaySendResult client_connection_send(ClientConnection* connection,
+    const RelayMessage* message)
+{
+    if (!connection || !atomic_load(&connection->connected))
+        return RELAY_SEND_CLOSED;
+    uint8_t* frame = NULL;
+    size_t frame_length = 0;
+    if (!protocol_encode(message, &frame, &frame_length))
+        return RELAY_SEND_ERROR;
+    RelaySendResult result = frame_queue_push(&connection->outbound, frame, frame_length);
+    if (result != RELAY_SEND_OK)
+        free(frame);
+    return result;
+}
+
+RelaySendResult client_connection_send_chat(ClientConnection* connection, const char* text)
+{
+    RelayMessage message = { .type = RELAY_MESSAGE_CHAT_SEND };
+    if (!text || strnlen(text, PROTOCOL_CHAT_MAX + 1u) > PROTOCOL_CHAT_MAX)
+        return RELAY_SEND_ERROR;
+    memcpy(message.as.chat_send.text, text, strlen(text) + 1u);
+    return client_connection_send(connection, &message);
+}
+
+typedef struct {
+    ClientConnection* connection;
+    RelayMessageHandler handler;
+    void* context;
+} PollContext;
+
+static void handle_incoming(void* opaque, const RelayMessage* message)
+{
+    PollContext* poll = opaque;
+    if (message->type == RELAY_MESSAGE_WELCOME)
+        atomic_store(&poll->connection->participant_id, message->as.welcome.participant_id);
+    poll->handler(poll->context, message);
+}
+
+int client_connection_poll(ClientConnection* connection, RelayMessageHandler handler,
+    void* context)
+{
+    if (!connection || !handler)
+        return -1;
+    if (!atomic_load(&connection->connected)) {
+        disconnect_from_server(connection);
+        return -1;
+    }
+    uint8_t buffer[CLIENT_RECEIVE_CHUNK];
+    PollContext poll = { .connection = connection, .handler = handler, .context = context };
+    int messages_available = 0;
+    for (;;) {
+#ifdef _WIN32
+        int received = recv(connection->socket_fd, (char*)buffer, (int)sizeof(buffer), 0);
+#else
+        ssize_t received = recv(connection->socket_fd, buffer, sizeof(buffer), 0);
+#endif
+        if (received > 0) {
+            messages_available = 1;
+            if (!protocol_decoder_feed(&connection->decoder, buffer, (size_t)received,
+                    handle_incoming, &poll)) {
+                disconnect_from_server(connection);
+                return -1;
+            }
+            continue;
+        }
+        if (received == 0) {
+            disconnect_from_server(connection);
+            return -1;
+        }
+#ifdef _WIN32
+        int error = WSAGetLastError();
+        if (error == WSAEWOULDBLOCK)
+            break;
+#else
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            break;
+#endif
+        disconnect_from_server(connection);
+        return -1;
+    }
+    return messages_available;
+}
+
+static RelaySendResult transport_send(void* context, const RelayMessage* message)
+{
+    return client_connection_send(context, message);
+}
+
+static bool transport_connected(void* context)
+{
+    return client_connection_is_connected(context);
+}
+
+RelayTransport client_connection_transport(ClientConnection* connection)
+{
+    return (RelayTransport) {
+        .context = connection,
+        .send = transport_send,
+        .connected = transport_connected
+    };
 }

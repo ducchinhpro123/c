@@ -1,380 +1,390 @@
-#include "client_logic.h"
-#include "client_network.h"
-#include "fff.h"
-#include "file_transfer_state.h"
-#include "message.h"
+#include "file_transfer.h"
 #include "unity.h"
+
+#include <dirent.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
-DEFINE_FFF_GLOBALS;
+#define CAPTURED_MESSAGE_MAX 32u
 
-// Fakes for functions called by handle_file_packet or its dependencies
-// Fake state variables normally in file_transfer_state.c
-char incoming_stream[INCOMING_STREAM_CAPACITY];
-size_t incoming_stream_len = 0;
+typedef struct {
+    RelayMessage messages[CAPTURED_MESSAGE_MAX];
+    size_t count;
+    bool connected;
+    bool backpressure_chunk_once;
+    bool backpressure_control_once;
+} FakeTransport;
 
-FAKE_VALUE_FUNC(IncomingTransfer*, get_incoming_transfer, const char*);
-FAKE_VALUE_FUNC(IncomingTransfer*, get_free_incoming);
-FAKE_VALUE_FUNC(OutgoingTransfer*, get_outgoing_transfer, const char*);
-FAKE_VOID_FUNC(finalize_incoming_transfer, IncomingTransfer*, bool, const char*);
-FAKE_VOID_FUNC(close_outgoing_transfer, struct ClientConnection*, OutgoingTransfer*, const char*);
-FAKE_VOID_FUNC(add_message, MessageQueue*, const char*, const char*);
-FAKE_VALUE_FUNC(int, recv_msg, ClientConnection*, char*, int);
-FAKE_VOID_FUNC(disconnect_from_server, ClientConnection*);
-FAKE_VALUE_FUNC(int, send_msg, ClientConnection*, const char*);
-FAKE_VOID_FUNC(abort_all_transfers);
-FAKE_VOID_FUNC(ensure_receive_directory);
+static char test_directory[] = "/tmp/relay-file-transfer-XXXXXX";
+static FileTransferModule* module;
+static FakeTransport fake;
+static RelayTransport transport;
+static char last_notice[512];
 
-// We need a realish MessageQueue for the tests
-MessageQueue g_mq;
-static char captured_file_id[FILE_ID_LEN + 1];
-static char captured_finalize_reason[256];
-
-static IncomingTransfer* capture_incoming_file_id(const char* file_id)
+static void clear_captured(void)
 {
-    snprintf(captured_file_id, sizeof(captured_file_id), "%s", file_id ? file_id : "");
-    return NULL;
+    for (size_t i = 0; i < fake.count; ++i) {
+        if (fake.messages[i].type == RELAY_MESSAGE_FILE_CHUNK)
+            free(fake.messages[i].as.file_chunk.data);
+    }
+    memset(fake.messages, 0, sizeof(fake.messages));
+    fake.count = 0;
 }
 
-static void capture_finalize_reason(IncomingTransfer* transfer, bool success, const char* reason)
+static RelaySendResult fake_send(void* context, const RelayMessage* message)
 {
-    (void)transfer;
-    (void)success;
-    snprintf(captured_finalize_reason, sizeof(captured_finalize_reason), "%s", reason ? reason : "");
+    FakeTransport* state = context;
+    if (!state->connected)
+        return RELAY_SEND_CLOSED;
+    if (state->backpressure_chunk_once && message->type == RELAY_MESSAGE_FILE_CHUNK) {
+        state->backpressure_chunk_once = false;
+        return RELAY_SEND_BACKPRESSURE;
+    }
+    if (state->backpressure_control_once && message->type != RELAY_MESSAGE_FILE_CHUNK) {
+        state->backpressure_control_once = false;
+        return RELAY_SEND_BACKPRESSURE;
+    }
+    TEST_ASSERT_LESS_THAN(CAPTURED_MESSAGE_MAX, state->count);
+    RelayMessage* captured = &state->messages[state->count++];
+    *captured = *message;
+    if (message->type == RELAY_MESSAGE_FILE_CHUNK) {
+        captured->as.file_chunk.data = malloc(message->as.file_chunk.data_length);
+        TEST_ASSERT_NOT_NULL(captured->as.file_chunk.data);
+        memcpy(captured->as.file_chunk.data, message->as.file_chunk.data,
+            message->as.file_chunk.data_length);
+    }
+    return RELAY_SEND_OK;
+}
+
+static bool fake_connected(void* context)
+{
+    return ((FakeTransport*)context)->connected;
+}
+
+static void capture_notice(void* context, const char* message)
+{
+    (void)context;
+    snprintf(last_notice, sizeof(last_notice), "%s", message);
+}
+
+static void cleanup_directory(void)
+{
+    DIR* directory = opendir(test_directory);
+    if (directory) {
+        struct dirent* entry;
+        while ((entry = readdir(directory)) != NULL) {
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+                continue;
+            char path[1024];
+            int written = snprintf(path, sizeof(path), "%s/%s", test_directory, entry->d_name);
+            if (written > 0 && (size_t)written < sizeof(path))
+                (void)remove(path);
+        }
+        closedir(directory);
+    }
+    (void)rmdir(test_directory);
+}
+
+static void write_source(const char* path, const uint8_t* bytes, size_t length)
+{
+    FILE* file = fopen(path, "wb");
+    TEST_ASSERT_NOT_NULL(file);
+    TEST_ASSERT_EQUAL_size_t(length, fwrite(bytes, 1, length, file));
+    TEST_ASSERT_EQUAL_INT(0, fclose(file));
 }
 
 void setUp(void)
 {
-    RESET_FAKE(get_incoming_transfer);
-    RESET_FAKE(get_free_incoming);
-    RESET_FAKE(get_outgoing_transfer);
-    RESET_FAKE(finalize_incoming_transfer);
-    RESET_FAKE(close_outgoing_transfer);
-    RESET_FAKE(add_message);
-    RESET_FAKE(recv_msg);
-    RESET_FAKE(disconnect_from_server);
-    RESET_FAKE(send_msg);
-    RESET_FAKE(abort_all_transfers);
-    RESET_FAKE(ensure_receive_directory);
-    FFF_RESET_HISTORY();
-    captured_file_id[0] = '\0';
-    captured_finalize_reason[0] = '\0';
-
-    reset_client_stream();
-    memset(&g_mq, 0, sizeof(MessageQueue));
-    // Reset any other global state if necessary
+    strcpy(test_directory, "/tmp/relay-file-transfer-XXXXXX");
+    TEST_ASSERT_NOT_NULL(mkdtemp(test_directory));
+    memset(&fake, 0, sizeof(fake));
+    fake.connected = true;
+    transport.context = &fake;
+    transport.send = fake_send;
+    transport.connected = fake_connected;
+    last_notice[0] = '\0';
+    module = file_transfer_create(test_directory, capture_notice, NULL);
+    TEST_ASSERT_NOT_NULL(module);
 }
 
 void tearDown(void)
 {
+    file_transfer_destroy(module);
+    module = NULL;
+    clear_captured();
+    cleanup_directory();
 }
 
-// Helper to simulate handle_file_packet call (it's static in client_logic.c, so we might need to expose it for testing or test through process_incoming_stream)
-// Looking at client_logic.c: handle_file_packet is static.
-// process_incoming_stream calls handle_packet, which calls handle_file_packet.
-// So we should test via process_incoming_stream or handle_packet if exposed.
-// Since handle_packet is ALSO static, we test via process_incoming_stream.
-
-void test_handle_file_start_normal(void)
+void test_outgoing_file_is_streamed_once_then_waits_for_each_delivery(void)
 {
-    // Arrange
-    IncomingTransfer mock_slot = { 0 };
-    get_free_incoming_fake.return_val = &mock_slot;
+    const uint8_t contents[] = { 0, 1, 2, 3, 0xff };
+    char source[1024];
+    snprintf(source, sizeof(source), "%s/source.bin", test_directory);
+    write_source(source, contents, sizeof(contents));
 
-    PacketHeader header;
-    header.type = PACKET_TYPE_FILE_START;
-    const char* payload = "sender|fileid123|test.txt|1024";
-    header.length = htonl(strlen(payload));
+    TEST_ASSERT_TRUE(file_transfer_offer_file(module, &transport, source));
+    TEST_ASSERT_EQUAL_size_t(1, fake.count);
+    TEST_ASSERT_EQUAL(RELAY_MESSAGE_FILE_OFFER_CREATE, fake.messages[0].type);
+    uint64_t request_id = fake.messages[0].as.file_offer_create.request_id;
+    TEST_ASSERT_NOT_EQUAL_UINT64(0, request_id);
 
-    char buffer[sizeof(PacketHeader) + 1024];
-    memcpy(buffer, &header, sizeof(PacketHeader));
-    memcpy(buffer + sizeof(PacketHeader), payload, strlen(payload));
+    RelayMessage created = { .type = RELAY_MESSAGE_FILE_OFFER_CREATED };
+    created.as.file_offer_created.request_id = request_id;
+    created.as.file_offer_created.offer_id = 42;
+    file_transfer_handle_message(module, &transport, &created);
 
-    // Act
-    process_incoming_stream(&g_mq, buffer, sizeof(PacketHeader) + strlen(payload));
+    RelayMessage ready = { .type = RELAY_MESSAGE_FILE_TRANSFER_READY };
+    ready.as.file_transfer_ready.offer_id = 42;
+    ready.as.file_transfer_ready.recipient_count = 2;
+    file_transfer_handle_message(module, &transport, &ready);
+    TEST_ASSERT_EQUAL_size_t(1, file_transfer_active_count(module));
 
-    // Assert
-    TEST_ASSERT_EQUAL(1, get_free_incoming_fake.call_count);
-    TEST_ASSERT_EQUAL(TRANSFER_STATE_PENDING, mock_slot.state); // Now uses state enum
-    TEST_ASSERT_EQUAL_STRING("fileid123", mock_slot.file_id);
-    TEST_ASSERT_EQUAL_STRING("test.txt", mock_slot.filename);
-    TEST_ASSERT_EQUAL(1024, mock_slot.total_bytes);
+    file_transfer_pump(module, &transport);
+    TEST_ASSERT_EQUAL_size_t(3, fake.count);
+    TEST_ASSERT_EQUAL(RELAY_MESSAGE_FILE_CHUNK, fake.messages[1].type);
+    TEST_ASSERT_EQUAL_UINT64(0, fake.messages[1].as.file_chunk.offset);
+    TEST_ASSERT_EQUAL_MEMORY(contents, fake.messages[1].as.file_chunk.data, sizeof(contents));
+    TEST_ASSERT_EQUAL(RELAY_MESSAGE_FILE_TRANSFER_END, fake.messages[2].type);
+
+    RelayMessage result = { .type = RELAY_MESSAGE_FILE_DELIVERY_UPDATE };
+    result.as.file_delivery_update.offer_id = 42;
+    result.as.file_delivery_update.recipient_id = 2;
+    result.as.file_delivery_update.success = true;
+    strcpy(result.as.file_delivery_update.recipient_name, "Bob");
+    file_transfer_handle_message(module, &transport, &result);
+    TEST_ASSERT_EQUAL_size_t(1, file_transfer_active_count(module));
+    result.as.file_delivery_update.recipient_id = 3;
+    strcpy(result.as.file_delivery_update.recipient_name, "Carol");
+    file_transfer_handle_message(module, &transport, &result);
+    TEST_ASSERT_EQUAL_size_t(0, file_transfer_active_count(module));
 }
 
-void test_handle_file_start_full_slots(void)
+void test_incoming_file_is_published_only_after_complete_delivery(void)
 {
-    // Arrange
-    get_free_incoming_fake.return_val = NULL; // No free slots
+    RelayMessage published = { .type = RELAY_MESSAGE_FILE_OFFER_PUBLISHED };
+    published.as.file_offer_published.offer_id = 81;
+    published.as.file_offer_published.sender_id = 7;
+    published.as.file_offer_published.total_size = 4;
+    strcpy(published.as.file_offer_published.sender_name, "Alice");
+    strcpy(published.as.file_offer_published.filename, "report.txt");
+    file_transfer_handle_message(module, &transport, &published);
+    TEST_ASSERT_EQUAL_size_t(1, file_transfer_pending_count(module));
 
-    PacketHeader header;
-    header.type = PACKET_TYPE_FILE_START;
-    const char* payload = "sender|fileid123|test.txt|1024";
-    header.length = htonl(strlen(payload));
+    FileOfferSnapshot offer;
+    TEST_ASSERT_TRUE(file_transfer_pending(module, 0, &offer));
+    TEST_ASSERT_EQUAL_UINT64(81, offer.offer_id);
+    TEST_ASSERT_TRUE(file_transfer_respond(module, &transport, offer.offer_id, true, NULL));
+    TEST_ASSERT_EQUAL_size_t(0, file_transfer_received_count(module));
 
-    char buffer[sizeof(PacketHeader) + 1024];
-    memcpy(buffer, &header, sizeof(PacketHeader));
-    memcpy(buffer + sizeof(PacketHeader), payload, strlen(payload));
+    uint8_t bytes[] = { 'd', 'a', 't', 'a' };
+    RelayMessage chunk = { .type = RELAY_MESSAGE_FILE_CHUNK };
+    chunk.as.file_chunk.offer_id = 81;
+    chunk.as.file_chunk.data = bytes;
+    chunk.as.file_chunk.data_length = sizeof(bytes);
+    file_transfer_handle_message(module, &transport, &chunk);
+    TEST_ASSERT_EQUAL_size_t(0, file_transfer_received_count(module));
 
-    // Act
-    process_incoming_stream(&g_mq, buffer, sizeof(PacketHeader) + strlen(payload));
+    RelayMessage end = { .type = RELAY_MESSAGE_FILE_TRANSFER_END };
+    end.as.file_transfer_end.offer_id = 81;
+    end.as.file_transfer_end.total_size = sizeof(bytes);
+    file_transfer_handle_message(module, &transport, &end);
+    TEST_ASSERT_EQUAL_size_t(1, file_transfer_received_count(module));
+    TEST_ASSERT_EQUAL(RELAY_MESSAGE_FILE_DELIVERY_RESULT,
+        fake.messages[fake.count - 1u].type);
+    TEST_ASSERT_TRUE(fake.messages[fake.count - 1u].as.file_delivery_result.success);
 
-    // Assert
-    TEST_ASSERT_EQUAL(1, get_free_incoming_fake.call_count);
-    // Should probably log or notify if full, but current implementation just returns.
+    char received_path[1024];
+    snprintf(received_path, sizeof(received_path), "%s/report.txt", test_directory);
+    FILE* file = fopen(received_path, "rb");
+    TEST_ASSERT_NOT_NULL(file);
+    uint8_t actual[4];
+    TEST_ASSERT_EQUAL_size_t(sizeof(actual), fread(actual, 1, sizeof(actual), file));
+    fclose(file);
+    TEST_ASSERT_EQUAL_MEMORY(bytes, actual, sizeof(bytes));
 }
 
-void test_handle_file_chunk_without_start(void)
+void test_bad_chunk_fails_only_that_delivery_and_removes_partial_file(void)
 {
-    // Arrange
-    get_incoming_transfer_fake.custom_fake = capture_incoming_file_id;
+    RelayMessage published = { .type = RELAY_MESSAGE_FILE_OFFER_PUBLISHED };
+    published.as.file_offer_published.offer_id = 90;
+    published.as.file_offer_published.total_size = 4;
+    strcpy(published.as.file_offer_published.sender_name, "Alice");
+    strcpy(published.as.file_offer_published.filename, "broken.bin");
+    file_transfer_handle_message(module, &transport, &published);
+    TEST_ASSERT_TRUE(file_transfer_respond(module, &transport, 90, true, NULL));
 
-    PacketHeader header;
-    header.type = PACKET_TYPE_FILE_CHUNK;
-    char payload[FILE_ID_LEN + 10];
-    memset(payload, 0, sizeof(payload)); // Use 0 instead of 'A'
-    memcpy(payload, "fileid123", 9);
+    uint8_t bytes[] = { 1, 2 };
+    RelayMessage chunk = { .type = RELAY_MESSAGE_FILE_CHUNK };
+    chunk.as.file_chunk.offer_id = 90;
+    chunk.as.file_chunk.offset = 1;
+    chunk.as.file_chunk.data = bytes;
+    chunk.as.file_chunk.data_length = sizeof(bytes);
+    file_transfer_handle_message(module, &transport, &chunk);
 
-    header.length = htonl(sizeof(payload));
-
-    char buffer[sizeof(PacketHeader) + sizeof(payload)];
-    memcpy(buffer, &header, sizeof(PacketHeader));
-    memcpy(buffer + sizeof(PacketHeader), payload, sizeof(payload));
-
-    // Act
-    process_incoming_stream(&g_mq, buffer, sizeof(PacketHeader) + sizeof(payload));
-
-    // Assert
-    TEST_ASSERT_EQUAL(1, get_incoming_transfer_fake.call_count);
-    TEST_ASSERT_EQUAL_STRING("fileid123", captured_file_id);
+    TEST_ASSERT_EQUAL_size_t(0, file_transfer_active_count(module));
+    TEST_ASSERT_EQUAL(RELAY_MESSAGE_FILE_DELIVERY_RESULT,
+        fake.messages[fake.count - 1u].type);
+    TEST_ASSERT_FALSE(fake.messages[fake.count - 1u].as.file_delivery_result.success);
+    char partial[1024];
+    snprintf(partial, sizeof(partial), "%s/.relay-%016llx.part", test_directory,
+        (unsigned long long)90);
+    TEST_ASSERT_EQUAL_INT(-1, access(partial, F_OK));
 }
 
-void test_handle_file_start_duplicate_id(void)
+void test_backpressure_retries_same_chunk_without_advancing_progress(void)
 {
-    // Arrange
-    IncomingTransfer existing_slot = { .state = TRANSFER_STATE_PENDING };
-    strcpy(existing_slot.file_id, "fileid123");
-    get_incoming_transfer_fake.return_val = &existing_slot;
+    const uint8_t contents[] = { 8, 9, 10 };
+    char source[1024];
+    snprintf(source, sizeof(source), "%s/retry.bin", test_directory);
+    write_source(source, contents, sizeof(contents));
+    TEST_ASSERT_TRUE(file_transfer_offer_file(module, &transport, source));
+    uint64_t request_id = fake.messages[0].as.file_offer_create.request_id;
 
-    PacketHeader header;
-    header.type = PACKET_TYPE_FILE_START;
-    const char* payload = "sender|fileid123|test.txt|1024";
-    header.length = htonl(strlen(payload));
+    RelayMessage created = { .type = RELAY_MESSAGE_FILE_OFFER_CREATED };
+    created.as.file_offer_created.request_id = request_id;
+    created.as.file_offer_created.offer_id = 101;
+    file_transfer_handle_message(module, &transport, &created);
+    RelayMessage ready = { .type = RELAY_MESSAGE_FILE_TRANSFER_READY };
+    ready.as.file_transfer_ready.offer_id = 101;
+    ready.as.file_transfer_ready.recipient_count = 1;
+    file_transfer_handle_message(module, &transport, &ready);
 
-    char buffer[sizeof(PacketHeader) + 1024];
-    memcpy(buffer, &header, sizeof(PacketHeader));
-    memcpy(buffer + sizeof(PacketHeader), payload, strlen(payload));
+    fake.backpressure_chunk_once = true;
+    file_transfer_pump(module, &transport);
+    TEST_ASSERT_EQUAL_size_t(1, fake.count);
+    FileTransferProgress progress;
+    TEST_ASSERT_TRUE(file_transfer_progress(module, 0, &progress));
+    TEST_ASSERT_EQUAL_UINT64(0, progress.transferred_size);
 
-    // Act
-    process_incoming_stream(&g_mq, buffer, sizeof(PacketHeader) + strlen(payload));
-
-    // Assert
-    TEST_ASSERT_EQUAL(1, get_incoming_transfer_fake.call_count);
-    TEST_ASSERT_EQUAL(0, get_free_incoming_fake.call_count); // Should NOT get a new slot
+    file_transfer_pump(module, &transport);
+    TEST_ASSERT_EQUAL(RELAY_MESSAGE_FILE_CHUNK, fake.messages[1].type);
+    TEST_ASSERT_EQUAL_UINT64(0, fake.messages[1].as.file_chunk.offset);
+    TEST_ASSERT_EQUAL_MEMORY(contents, fake.messages[1].as.file_chunk.data, sizeof(contents));
 }
 
-void test_handle_file_end_size_mismatch_under(void)
+void test_delivery_failure_during_streaming_is_counted_before_transfer_end(void)
 {
-    // Arrange
-    IncomingTransfer slot = {
-        .state = TRANSFER_STATE_ACCEPTED,
-        .total_bytes = 1000,
-        .received_bytes = 500, // Under
-        .fp = (FILE*)1 // Mock pointer
-    };
-    strcpy(slot.file_id, "fileid123");
-    get_incoming_transfer_fake.return_val = &slot;
+    const uint8_t contents[] = { 3, 4, 5 };
+    char source[1024];
+    snprintf(source, sizeof(source), "%s/early-failure.bin", test_directory);
+    write_source(source, contents, sizeof(contents));
+    TEST_ASSERT_TRUE(file_transfer_offer_file(module, &transport, source));
+    uint64_t request_id = fake.messages[0].as.file_offer_create.request_id;
 
-    PacketHeader header;
-    header.type = PACKET_TYPE_FILE_END;
-    const char* payload = "sender|fileid123";
-    header.length = htonl(strlen(payload));
+    RelayMessage created = { .type = RELAY_MESSAGE_FILE_OFFER_CREATED };
+    created.as.file_offer_created.request_id = request_id;
+    created.as.file_offer_created.offer_id = 111;
+    file_transfer_handle_message(module, &transport, &created);
+    RelayMessage ready = { .type = RELAY_MESSAGE_FILE_TRANSFER_READY };
+    ready.as.file_transfer_ready.offer_id = 111;
+    ready.as.file_transfer_ready.recipient_count = 2;
+    file_transfer_handle_message(module, &transport, &ready);
 
-    char buffer[sizeof(PacketHeader) + 1024];
-    memcpy(buffer, &header, sizeof(PacketHeader));
-    memcpy(buffer + sizeof(PacketHeader), payload, strlen(payload));
+    RelayMessage failed = { .type = RELAY_MESSAGE_FILE_DELIVERY_UPDATE };
+    failed.as.file_delivery_update.offer_id = 111;
+    failed.as.file_delivery_update.recipient_id = 2;
+    strcpy(failed.as.file_delivery_update.recipient_name, "Bob");
+    strcpy(failed.as.file_delivery_update.reason, "disk full");
+    file_transfer_handle_message(module, &transport, &failed);
+    file_transfer_pump(module, &transport);
+    TEST_ASSERT_EQUAL_size_t(1, file_transfer_active_count(module));
 
-    // Act
-    process_incoming_stream(&g_mq, buffer, sizeof(PacketHeader) + strlen(payload));
-
-    // Assert
-    TEST_ASSERT_EQUAL(1, finalize_incoming_transfer_fake.call_count);
-    TEST_ASSERT_FALSE(finalize_incoming_transfer_fake.arg1_val); // success = false
-    TEST_ASSERT_EQUAL_STRING("incomplete file", finalize_incoming_transfer_fake.arg2_val);
+    RelayMessage succeeded = { .type = RELAY_MESSAGE_FILE_DELIVERY_UPDATE };
+    succeeded.as.file_delivery_update.offer_id = 111;
+    succeeded.as.file_delivery_update.recipient_id = 3;
+    succeeded.as.file_delivery_update.success = true;
+    strcpy(succeeded.as.file_delivery_update.recipient_name, "Carol");
+    file_transfer_handle_message(module, &transport, &succeeded);
+    TEST_ASSERT_EQUAL_size_t(0, file_transfer_active_count(module));
 }
 
-void test_handle_file_abort(void)
+void test_existing_received_file_is_never_overwritten(void)
 {
-    // Arrange
-    IncomingTransfer slot = { .state = TRANSFER_STATE_ACCEPTED };
-    strcpy(slot.file_id, "fileid123");
-    get_incoming_transfer_fake.return_val = &slot;
-    finalize_incoming_transfer_fake.custom_fake = capture_finalize_reason;
+    const uint8_t old_contents[] = { 'o', 'l', 'd' };
+    const uint8_t new_contents[] = { 'n', 'e', 'w' };
+    char existing[1024];
+    snprintf(existing, sizeof(existing), "%s/report.txt", test_directory);
+    write_source(existing, old_contents, sizeof(old_contents));
 
-    PacketHeader header;
-    header.type = PACKET_TYPE_FILE_ABORT;
-    const char* payload = "sender|fileid123|User canceled";
-    header.length = htonl(strlen(payload));
+    RelayMessage published = { .type = RELAY_MESSAGE_FILE_OFFER_PUBLISHED };
+    published.as.file_offer_published.offer_id = 120;
+    published.as.file_offer_published.total_size = sizeof(new_contents);
+    strcpy(published.as.file_offer_published.sender_name, "Alice");
+    strcpy(published.as.file_offer_published.filename, "report.txt");
+    file_transfer_handle_message(module, &transport, &published);
+    TEST_ASSERT_TRUE(file_transfer_respond(module, &transport, 120, true, NULL));
 
-    char buffer[sizeof(PacketHeader) + 1024];
-    memcpy(buffer, &header, sizeof(PacketHeader));
-    memcpy(buffer + sizeof(PacketHeader), payload, strlen(payload));
+    RelayMessage chunk = { .type = RELAY_MESSAGE_FILE_CHUNK };
+    chunk.as.file_chunk.offer_id = 120;
+    chunk.as.file_chunk.data = (uint8_t*)new_contents;
+    chunk.as.file_chunk.data_length = sizeof(new_contents);
+    file_transfer_handle_message(module, &transport, &chunk);
+    RelayMessage end = { .type = RELAY_MESSAGE_FILE_TRANSFER_END };
+    end.as.file_transfer_end.offer_id = 120;
+    end.as.file_transfer_end.total_size = sizeof(new_contents);
+    file_transfer_handle_message(module, &transport, &end);
 
-    // Act
-    process_incoming_stream(&g_mq, buffer, sizeof(PacketHeader) + strlen(payload));
+    FILE* original = fopen(existing, "rb");
+    TEST_ASSERT_NOT_NULL(original);
+    uint8_t actual_old[sizeof(old_contents)];
+    TEST_ASSERT_EQUAL_size_t(sizeof(actual_old),
+        fread(actual_old, 1, sizeof(actual_old), original));
+    fclose(original);
+    TEST_ASSERT_EQUAL_MEMORY(old_contents, actual_old, sizeof(old_contents));
 
-    // Assert
-    TEST_ASSERT_EQUAL(1, finalize_incoming_transfer_fake.call_count);
-    TEST_ASSERT_FALSE(finalize_incoming_transfer_fake.arg1_val); // success = false
-    TEST_ASSERT_EQUAL_STRING("User canceled", captured_finalize_reason);
+    char duplicate[1024];
+    snprintf(duplicate, sizeof(duplicate), "%s/report.txt(1)", test_directory);
+    FILE* received = fopen(duplicate, "rb");
+    TEST_ASSERT_NOT_NULL(received);
+    uint8_t actual_new[sizeof(new_contents)];
+    TEST_ASSERT_EQUAL_size_t(sizeof(actual_new),
+        fread(actual_new, 1, sizeof(actual_new), received));
+    fclose(received);
+    TEST_ASSERT_EQUAL_MEMORY(new_contents, actual_new, sizeof(new_contents));
 }
 
-void test_handle_file_chunk_over_size(void)
+void test_delivery_result_is_deferred_across_control_backpressure(void)
 {
-    // Arrange
-    FILE* dev_null = fopen("/dev/null", "wb");
-    TEST_ASSERT_NOT_NULL(dev_null);
+    RelayMessage published = { .type = RELAY_MESSAGE_FILE_OFFER_PUBLISHED };
+    published.as.file_offer_published.offer_id = 130;
+    published.as.file_offer_published.total_size = 1;
+    strcpy(published.as.file_offer_published.sender_name, "Alice");
+    strcpy(published.as.file_offer_published.filename, "deferred.bin");
+    file_transfer_handle_message(module, &transport, &published);
+    TEST_ASSERT_TRUE(file_transfer_respond(module, &transport, 130, true, NULL));
 
-    IncomingTransfer slot = {
-        .state = TRANSFER_STATE_ACCEPTED,
-        .total_bytes = 100,
-        .received_bytes = 90,
-        .fp = dev_null
-    };
-    strcpy(slot.file_id, "fileid123");
-    get_incoming_transfer_fake.return_val = &slot;
+    uint8_t byte = 9;
+    RelayMessage chunk = { .type = RELAY_MESSAGE_FILE_CHUNK };
+    chunk.as.file_chunk.offer_id = 130;
+    chunk.as.file_chunk.data = &byte;
+    chunk.as.file_chunk.data_length = 1;
+    file_transfer_handle_message(module, &transport, &chunk);
+    size_t count_before_end = fake.count;
+    fake.backpressure_control_once = true;
+    RelayMessage end = { .type = RELAY_MESSAGE_FILE_TRANSFER_END };
+    end.as.file_transfer_end.offer_id = 130;
+    end.as.file_transfer_end.total_size = 1;
+    file_transfer_handle_message(module, &transport, &end);
+    TEST_ASSERT_EQUAL_size_t(count_before_end, fake.count);
 
-    PacketHeader header;
-    header.type = PACKET_TYPE_FILE_CHUNK;
-    char payload[FILE_ID_LEN + 20]; // 20 bytes payload
-    memset(payload, 0, sizeof(payload));
-    memcpy(payload, "fileid123", 9);
-
-    header.length = htonl(sizeof(payload));
-
-    char buffer[sizeof(PacketHeader) + sizeof(payload)];
-    memcpy(buffer, &header, sizeof(PacketHeader));
-    memcpy(buffer + sizeof(PacketHeader), payload, sizeof(payload));
-
-    // Act
-    process_incoming_stream(&g_mq, buffer, sizeof(PacketHeader) + sizeof(payload));
-
-    // Assert
-    // received_bytes becomes 110, which is > total_bytes (100)
-    TEST_ASSERT_EQUAL(1, finalize_incoming_transfer_fake.call_count);
-    TEST_ASSERT_FALSE(finalize_incoming_transfer_fake.arg1_val);
-    TEST_ASSERT_EQUAL_STRING("received more than expected", finalize_incoming_transfer_fake.arg2_val);
-
-    fclose(dev_null);
+    file_transfer_pump(module, &transport);
+    TEST_ASSERT_EQUAL_size_t(count_before_end + 1u, fake.count);
+    TEST_ASSERT_EQUAL(RELAY_MESSAGE_FILE_DELIVERY_RESULT,
+        fake.messages[fake.count - 1u].type);
+    TEST_ASSERT_TRUE(fake.messages[fake.count - 1u].as.file_delivery_result.success);
 }
-
-void test_handle_file_start_invalid_format(void)
-{
-    // Arrange
-    get_free_incoming_fake.return_val = (IncomingTransfer*)1; // Should not be reached
-
-    PacketHeader header;
-    header.type = PACKET_TYPE_FILE_START;
-    const char* payload = "sender|only_two_fields";
-    header.length = htonl(strlen(payload));
-
-    char buffer[sizeof(PacketHeader) + 1024];
-    memcpy(buffer, &header, sizeof(PacketHeader));
-    memcpy(buffer + sizeof(PacketHeader), payload, strlen(payload));
-
-    // Act
-    process_incoming_stream(&g_mq, buffer, sizeof(PacketHeader) + strlen(payload));
-
-    // Assert
-    TEST_ASSERT_EQUAL(0, get_free_incoming_fake.call_count); // Should return early
-}
-
-void test_filename_sanitization(void)
-{
-    char filename[] = "../../etc/passwd";
-    sanitize_filename(filename);
-    TEST_ASSERT_EQUAL_STRING(".._.._etc_passwd", filename);
-
-    char filename2[] = "C:\\Windows\\System32\\cmd.exe";
-    sanitize_filename(filename2);
-    // C (0), : (1), \ (2), W (3) ...
-    // Expected: C__Windows_System32_cmd.exe
-    TEST_ASSERT_EQUAL_STRING("C__Windows_System32_cmd.exe", filename2);
-
-    char filename3[] = "report. ";
-    sanitize_filename(filename3);
-    TEST_ASSERT_EQUAL_STRING("report__", filename3);
-
-    char filename4[] = "bad\x01name";
-    sanitize_filename(filename4);
-    TEST_ASSERT_EQUAL_STRING("bad_name", filename4);
-}
-
-void test_rejects_oversized_packet_header(void)
-{
-    PacketHeader header = {
-        .type = PACKET_TYPE_TEXT,
-        .length = htonl(PROTOCOL_TEXT_MAX_LEN + 1)
-    };
-
-    TEST_ASSERT_FALSE(process_incoming_stream(&g_mq, (const char*)&header, sizeof(header)));
-    TEST_ASSERT_EQUAL(0, incoming_stream_len);
-}
-
-void test_rejects_unknown_packet_type(void)
-{
-    PacketHeader header = {
-        .type = 255,
-        .length = htonl(1)
-    };
-
-    TEST_ASSERT_FALSE(process_incoming_stream(&g_mq, (const char*)&header, sizeof(header)));
-    TEST_ASSERT_EQUAL(0, incoming_stream_len);
-}
-
-void test_rejects_invalid_file_size(void)
-{
-    PacketHeader header;
-    header.type = PACKET_TYPE_FILE_START;
-    const char* payload = "sender|fileid123|test.txt|12junk|1024";
-    header.length = htonl(strlen(payload));
-    char buffer[sizeof(PacketHeader) + 128];
-    memcpy(buffer, &header, sizeof(header));
-    memcpy(buffer + sizeof(header), payload, strlen(payload));
-
-    TEST_ASSERT_TRUE(process_incoming_stream(&g_mq, buffer, sizeof(header) + strlen(payload)));
-    TEST_ASSERT_EQUAL(0, get_free_incoming_fake.call_count);
-}
-
-void test_secure_file_id_format(void)
-{
-    char first[FILE_ID_LEN];
-    char second[FILE_ID_LEN];
-    TEST_ASSERT_TRUE(generate_file_id(first, sizeof(first)));
-    TEST_ASSERT_TRUE(generate_file_id(second, sizeof(second)));
-    TEST_ASSERT_EQUAL(FILE_ID_LEN - 1, strlen(first));
-    TEST_ASSERT_TRUE(protocol_file_id_is_valid(first));
-    TEST_ASSERT_TRUE(strcmp(first, second) != 0);
-}
-
-// Since we can't easily have multiple mains, we'll combine tests into one runner or use a separate one.
-// For now, I'll just put a main here and we will fix nob.c to build multiple runners.
 
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_handle_file_start_normal);
-    RUN_TEST(test_handle_file_start_full_slots);
-    RUN_TEST(test_handle_file_chunk_without_start);
-    RUN_TEST(test_handle_file_start_duplicate_id);
-    RUN_TEST(test_handle_file_end_size_mismatch_under);
-    RUN_TEST(test_handle_file_abort);
-    RUN_TEST(test_handle_file_chunk_over_size);
-    RUN_TEST(test_handle_file_start_invalid_format);
-    RUN_TEST(test_filename_sanitization);
-    RUN_TEST(test_rejects_oversized_packet_header);
-    RUN_TEST(test_rejects_unknown_packet_type);
-    RUN_TEST(test_rejects_invalid_file_size);
-    RUN_TEST(test_secure_file_id_format);
+    RUN_TEST(test_outgoing_file_is_streamed_once_then_waits_for_each_delivery);
+    RUN_TEST(test_incoming_file_is_published_only_after_complete_delivery);
+    RUN_TEST(test_bad_chunk_fails_only_that_delivery_and_removes_partial_file);
+    RUN_TEST(test_backpressure_retries_same_chunk_without_advancing_progress);
+    RUN_TEST(test_delivery_failure_during_streaming_is_counted_before_transfer_end);
+    RUN_TEST(test_existing_received_file_is_never_overwritten);
+    RUN_TEST(test_delivery_result_is_deferred_across_control_backpressure);
     return UNITY_END();
 }

@@ -1,13 +1,21 @@
 #include "server.h"
+#include "platform.h"
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
-#ifndef _WIN32
-    #include <unistd.h>
-#endif
+#include <time.h>
 
 static volatile sig_atomic_t g_running = 1;
 
+static void idle_briefly(void)
+{
+#ifdef _WIN32
+    Sleep(20);
+#else
+    struct timespec interval = { .tv_sec = 0, .tv_nsec = 20 * 1000 * 1000 };
+    (void)nanosleep(&interval, NULL);
+#endif
+}
 
 static void handle_signal(int sig)
 {
@@ -47,8 +55,7 @@ int main(void)
             prev_client_count = cur_client_count;
         }
 
-        // Small sleep to avoid busy loop
-        usleep(20 * 1000); // 20ms
+        idle_briefly();
     }
 
     printf("Shutting down server...\n");

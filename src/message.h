@@ -5,7 +5,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 
-#define MSG_BUFFER (PROTOCOL_TEXT_MAX_LEN + 1)
+#define MSG_BUFFER (PROTOCOL_CHAT_MAX + 1u)
 #define MAX_MESSAGES 200
 
 typedef struct {

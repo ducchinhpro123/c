@@ -1,93 +1,140 @@
-#ifndef PROTOCOL_H
-#define PROTOCOL_H
+#ifndef RELAY_PROTOCOL_H
+#define RELAY_PROTOCOL_H
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-// The protocol is intentionally small and bounded. Every peer must validate a
-// header before allocating memory or waiting for its payload.
-#define PROTOCOL_USERNAME_MAX_LEN 24u
-#define PROTOCOL_TEXT_MAX_LEN 4096u
-#define PROTOCOL_CHAT_CONTENT_MAX_LEN 4000u
-#define PROTOCOL_FILE_ID_LEN 32u
+#define PROTOCOL_VERSION 2u
+#define PROTOCOL_FRAME_HEADER_SIZE 5u
+#define PROTOCOL_DISPLAY_NAME_MAX 24u
+#define PROTOCOL_CHAT_MAX 4000u
+#define PROTOCOL_FILENAME_MAX 255u
+#define PROTOCOL_REASON_MAX 255u
 #define PROTOCOL_FILE_CHUNK_MAX (1024u * 1024u)
-#define PROTOCOL_METADATA_MAX_LEN 1024u
-#define PROTOCOL_MAX_PAYLOAD (PROTOCOL_FILE_ID_LEN + PROTOCOL_FILE_CHUNK_MAX)
+#define PROTOCOL_FILE_MAX_SIZE (500ull * 1024ull * 1024ull)
+#define PROTOCOL_MAX_PAYLOAD (PROTOCOL_FILE_CHUNK_MAX + 64u)
 
 typedef enum {
-    PACKET_TYPE_TEXT = 0,
-    PACKET_TYPE_FILE_START = 1,
-    PACKET_TYPE_FILE_CHUNK = 2,
-    PACKET_TYPE_FILE_END = 3,
-    PACKET_TYPE_FILE_ABORT = 4,
-    PACKET_TYPE_FILE_ACCEPT = 5
-} PacketType;
+    RELAY_MESSAGE_HELLO = 1,
+    RELAY_MESSAGE_WELCOME = 2,
+    RELAY_MESSAGE_CHAT_SEND = 3,
+    RELAY_MESSAGE_CHAT_DELIVER = 4,
+    RELAY_MESSAGE_FILE_OFFER_CREATE = 5,
+    RELAY_MESSAGE_FILE_OFFER_CREATED = 6,
+    RELAY_MESSAGE_FILE_OFFER_PUBLISHED = 7,
+    RELAY_MESSAGE_FILE_OFFER_RESPONSE = 8,
+    RELAY_MESSAGE_FILE_TRANSFER_READY = 9,
+    RELAY_MESSAGE_FILE_CHUNK = 10,
+    RELAY_MESSAGE_FILE_TRANSFER_END = 11,
+    RELAY_MESSAGE_FILE_DELIVERY_RESULT = 12,
+    RELAY_MESSAGE_FILE_DELIVERY_UPDATE = 13,
+    RELAY_MESSAGE_FILE_OFFER_DECLINED = 14,
+    RELAY_MESSAGE_FILE_TRANSFER_CANCEL = 15,
+    RELAY_MESSAGE_ACTION_REJECTED = 16
+} RelayMessageType;
 
-#pragma pack(push, 1)
 typedef struct {
-    uint8_t type;
-    uint32_t length; // Network byte order on the wire.
-} PacketHeader;
-#pragma pack(pop)
+    RelayMessageType type;
+    union {
+        struct {
+            uint16_t version;
+            char display_name[PROTOCOL_DISPLAY_NAME_MAX + 1u];
+        } hello;
+        struct {
+            uint64_t participant_id;
+        } welcome;
+        struct {
+            char text[PROTOCOL_CHAT_MAX + 1u];
+        } chat_send;
+        struct {
+            uint64_t participant_id;
+            char display_name[PROTOCOL_DISPLAY_NAME_MAX + 1u];
+            char text[PROTOCOL_CHAT_MAX + 1u];
+        } chat_deliver;
+        struct {
+            uint64_t request_id;
+            char filename[PROTOCOL_FILENAME_MAX + 1u];
+            uint64_t total_size;
+            uint32_t chunk_size;
+        } file_offer_create;
+        struct {
+            uint64_t request_id;
+            uint64_t offer_id;
+            uint32_t offer_window_ms;
+        } file_offer_created;
+        struct {
+            uint64_t offer_id;
+            uint64_t sender_id;
+            char sender_name[PROTOCOL_DISPLAY_NAME_MAX + 1u];
+            char filename[PROTOCOL_FILENAME_MAX + 1u];
+            uint64_t total_size;
+            uint32_t offer_window_ms;
+        } file_offer_published;
+        struct {
+            uint64_t offer_id;
+            bool accepted;
+        } file_offer_response;
+        struct {
+            uint64_t offer_id;
+            uint16_t recipient_count;
+        } file_transfer_ready;
+        struct {
+            uint64_t offer_id;
+            uint64_t offset;
+            uint8_t* data;
+            uint32_t data_length;
+        } file_chunk;
+        struct {
+            uint64_t offer_id;
+            uint64_t total_size;
+        } file_transfer_end;
+        struct {
+            uint64_t offer_id;
+            bool success;
+            char reason[PROTOCOL_REASON_MAX + 1u];
+        } file_delivery_result;
+        struct {
+            uint64_t offer_id;
+            uint64_t recipient_id;
+            char recipient_name[PROTOCOL_DISPLAY_NAME_MAX + 1u];
+            bool success;
+            char reason[PROTOCOL_REASON_MAX + 1u];
+        } file_delivery_update;
+        struct {
+            uint64_t offer_id;
+        } file_offer_declined;
+        struct {
+            uint64_t offer_id;
+            char reason[PROTOCOL_REASON_MAX + 1u];
+        } file_transfer_cancel;
+        struct {
+            RelayMessageType rejected_type;
+            uint64_t correlation_id;
+            char reason[PROTOCOL_REASON_MAX + 1u];
+        } action_rejected;
+    } as;
+} RelayMessage;
 
-static inline bool protocol_packet_is_valid(uint8_t type, uint32_t length)
-{
-    switch (type) {
-    case PACKET_TYPE_TEXT:
-        return length > 0 && length <= PROTOCOL_TEXT_MAX_LEN;
-    case PACKET_TYPE_FILE_START:
-        return length > 0 && length <= PROTOCOL_METADATA_MAX_LEN;
-    case PACKET_TYPE_FILE_CHUNK:
-        return length > PROTOCOL_FILE_ID_LEN && length <= PROTOCOL_MAX_PAYLOAD;
-    case PACKET_TYPE_FILE_END:
-    case PACKET_TYPE_FILE_ABORT:
-    case PACKET_TYPE_FILE_ACCEPT:
-        return length > 0 && length <= PROTOCOL_METADATA_MAX_LEN;
-    default:
-        return false;
-    }
-}
+typedef struct {
+    uint8_t* buffer;
+    size_t length;
+    size_t capacity;
+} ProtocolDecoder;
 
-static inline bool protocol_username_is_valid(const char* username)
-{
-    if (!username)
-        return false;
+typedef void (*RelayMessageHandler)(void* context, const RelayMessage* message);
 
-    size_t len = 0;
-    for (; username[len] != '\0'; ++len) {
-        unsigned char c = (unsigned char)username[len];
-        if (len >= PROTOCOL_USERNAME_MAX_LEN || c < 0x20 || c == 0x7f || c == ':' || c == '|')
-            return false;
-    }
+bool protocol_display_name_is_valid(const char* display_name);
+bool protocol_message_is_valid(const RelayMessage* message);
 
-    return len > 0 && username[0] != ' ' && username[len - 1] != ' ';
-}
+bool protocol_encode(const RelayMessage* message, uint8_t** frame, size_t* frame_length);
 
-static inline bool protocol_text_is_valid(const char* text, size_t len)
-{
-    if (!text || len == 0 || len > PROTOCOL_TEXT_MAX_LEN)
-        return false;
+void protocol_decoder_init(ProtocolDecoder* decoder);
+void protocol_decoder_reset(ProtocolDecoder* decoder);
+void protocol_decoder_destroy(ProtocolDecoder* decoder);
+bool protocol_decoder_feed(ProtocolDecoder* decoder, const uint8_t* bytes, size_t length,
+    RelayMessageHandler handler, void* context);
 
-    for (size_t i = 0; i < len; ++i) {
-        unsigned char c = (unsigned char)text[i];
-        if (c == '\0' || (c < 0x20 && c != '\n' && c != '\t'))
-            return false;
-    }
-    return true;
-}
+void protocol_message_destroy(RelayMessage* message);
 
-static inline bool protocol_file_id_is_valid(const char* file_id)
-{
-    if (!file_id)
-        return false;
-    size_t len = 0;
-    for (; file_id[len] != '\0'; ++len) {
-        char c = file_id[len];
-        if (len >= PROTOCOL_FILE_ID_LEN - 1 || !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-' || c == '_'))
-            return false;
-    }
-    return len > 0;
-}
-
-#endif // PROTOCOL_H
+#endif

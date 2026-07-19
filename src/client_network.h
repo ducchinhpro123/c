@@ -1,40 +1,33 @@
 #ifndef CLIENT_NETWORK_H
 #define CLIENT_NETWORK_H
 
-#include "platform.h"
 #include "protocol.h"
-#include <stdatomic.h>
+#include "relay_transport.h"
+
 #include <stdbool.h>
 #include <stdint.h>
-#ifndef _WIN32
-#include <sys/types.h>
-#endif
 
-#include "packet_queue.h"
-#include <pthread.h>
+typedef struct ClientConnection ClientConnection;
 
-typedef struct ClientConnection {
-    int socket_fd;
-    atomic_bool connected;
-    bool sender_thread_started;
-    char username[PROTOCOL_USERNAME_MAX_LEN + 1];
-    PacketQueue queue;
-    pthread_t sender_thread;
-} ClientConnection;
+ClientConnection* client_connection_create(void);
+void client_connection_destroy(ClientConnection* connection);
 
-// Initialize connection
-void init_client_connection(ClientConnection* conn);
+int connect_to_server(ClientConnection* connection, const char* host, const char* port,
+    const char* display_name);
+void disconnect_from_server(ClientConnection* connection);
 
-int connect_to_server(ClientConnection* conn, const char* host, const char* port, const char* username);
+bool client_connection_is_connected(const ClientConnection* connection);
+uint64_t client_connection_participant_id(const ClientConnection* connection);
+const char* client_connection_display_name(const ClientConnection* connection);
 
-// Send a text message (wraps it in PACKET_TYPE_TEXT)
-int send_msg(ClientConnection* conn, const char* msg);
+RelaySendResult client_connection_send(ClientConnection* connection,
+    const RelayMessage* message);
+RelaySendResult client_connection_send_chat(ClientConnection* connection,
+    const char* text);
 
-// Send a generic packet
-int send_packet(ClientConnection* conn, uint8_t type, const void* data, uint32_t length);
+int client_connection_poll(ClientConnection* connection, RelayMessageHandler handler,
+    void* context);
 
-int recv_msg(ClientConnection* conn, char* buffer, int size);
-
-void disconnect_from_server(ClientConnection* conn);
+RelayTransport client_connection_transport(ClientConnection* connection);
 
 #endif

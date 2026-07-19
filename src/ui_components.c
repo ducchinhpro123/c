@@ -1,6 +1,6 @@
 #include "ui_components.h"
 #include "client_network.h"
-#include "file_transfer_state.h"
+#include "file_transfer.h"
 #include "message.h"
 #include "warning_dialog.h"
 #include "window.h" // For WINDOW_WIDTH/HEIGHT
@@ -25,7 +25,7 @@
 #define FILENAME_TRUNCATE_THRESHOLD 25
 
 static bool edit_mode = false;
-static char text_buffer[PROTOCOL_CHAT_CONTENT_MAX_LEN + 1] = "";
+static char text_buffer[PROTOCOL_CHAT_MAX + 1u] = "";
 
 static const Color UI_NAVY = { 15, 23, 42, 255 };
 static const Color UI_SLATE = { 71, 85, 105, 255 };
@@ -84,7 +84,7 @@ void text_input(struct ClientConnection* conn, const char* username, MessageQueu
     if (edit_mode && IsKeyPressed(KEY_ENTER)) {
         if (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) {
             size_t len = strlen(text_buffer);
-            if (len < PROTOCOL_CHAT_CONTENT_MAX_LEN - 1) {
+            if (len < PROTOCOL_CHAT_MAX - 1u) {
                 text_buffer[len] = '\n';
                 text_buffer[len + 1] = '\0';
                 shift_enter_pressed = true;
@@ -95,7 +95,7 @@ void text_input(struct ClientConnection* conn, const char* username, MessageQueu
         }
     }
 
-    if (GuiTextBox(input_bounds, text_buffer, PROTOCOL_CHAT_CONTENT_MAX_LEN + 1, edit_mode)) {
+    if (GuiTextBox(input_bounds, text_buffer, PROTOCOL_CHAT_MAX + 1u, edit_mode)) {
         if (!shift_enter_pressed) {
             edit_mode = !edit_mode;
         } else {
@@ -109,7 +109,7 @@ void text_input(struct ClientConnection* conn, const char* username, MessageQueu
     }
 
     if (was_sent && strlen(text_buffer) > 0) {
-        size_t raw_len = strnlen(text_buffer, PROTOCOL_CHAT_CONTENT_MAX_LEN);
+        size_t raw_len = strnlen(text_buffer, PROTOCOL_CHAT_MAX);
         char* tmp = (char*)malloc(raw_len + 1);
         if (!tmp)
             return;
@@ -124,8 +124,8 @@ void text_input(struct ClientConnection* conn, const char* username, MessageQueu
             *--e = '\0';
 
         if (*s) {
-            int bytes_sent = send_msg((ClientConnection*)conn, s);
-            if (bytes_sent == 0) {
+            RelaySendResult result = client_connection_send_chat((ClientConnection*)conn, s);
+            if (result == RELAY_SEND_OK) {
                 add_message(mq, "me", s);
                 text_buffer[0] = '\0';
                 edit_mode = true;
@@ -369,7 +369,7 @@ void connection_screen(int* port, char* server_ip, char* port_str, char* usernam
 
     DrawTextEx(font, "DISPLAY NAME", (Vector2) { 766, 226 }, 12, 1.1f, UI_MUTED);
     if (GuiTextBox((Rectangle) { 766, 248, 388, 46 }, username,
-            PROTOCOL_USERNAME_MAX_LEN + 1, username_edit_mode)) {
+            PROTOCOL_DISPLAY_NAME_MAX + 1u, username_edit_mode)) {
         username_edit_mode = !username_edit_mode;
     }
 
@@ -401,8 +401,8 @@ void connection_screen(int* port, char* server_ip, char* port_str, char* usernam
             while (e > username_trimmed && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r'))
                 *--e = '\0';
 
-            if (!protocol_username_is_valid(username_trimmed)) {
-                show_error("Use 1-24 characters; ':' and '|' are not allowed");
+            if (!protocol_display_name_is_valid(username_trimmed)) {
+                show_error("Use a display name containing 1-24 printable characters");
             } else if (server_ip[0] == '\0') {
                 show_error("Enter a server address");
             } else if (connect_to_server((ClientConnection*)conn, server_ip, port_str, username_trimmed) == 0) {
@@ -420,12 +420,13 @@ void connection_screen(int* port, char* server_ip, char* port_str, char* usernam
         (Color) { 129, 140, 248, 255 });
 }
 
-static char* format_file_size(long file_size)
+static char* format_file_size(uint64_t file_size)
 {
     static char file_size_str[64];
 
     if (file_size < 1024) {
-        snprintf(file_size_str, sizeof(file_size_str), "%ld B", file_size);
+        snprintf(file_size_str, sizeof(file_size_str), "%llu B",
+            (unsigned long long)file_size);
         return file_size_str;
     } else if (file_size < 1024 * 1024) {
         snprintf(file_size_str, sizeof(file_size_str), "%.2f KB", file_size / 1024.0);
@@ -436,7 +437,7 @@ static char* format_file_size(long file_size)
     }
 }
 
-void files_displaying(Font font)
+void files_displaying(Font font, FileTransferModule* transfers)
 {
     Rectangle card = { 912, 92, 336, 598 };
     Rectangle drop_zone = { 928, 146, 304, 82 };
@@ -445,6 +446,7 @@ void files_displaying(Font font)
     float spacing = 0.2f;
     float line_height = 52.f;
     float font_size = 14.f;
+    size_t received_count = file_transfer_received_count(transfers);
 
     draw_card(card, 0.06f);
     DrawTextEx(font, "Files", (Vector2) { 932, 112 }, 21, 0.1f, UI_NAVY);
@@ -459,11 +461,11 @@ void files_displaying(Font font)
 
     DrawTextEx(font, "RECEIVED", (Vector2) { 928, 249 }, 12, 1.0f, UI_MUTED);
     char file_count[24];
-    snprintf(file_count, sizeof(file_count), "%d", received_files_count);
+    snprintf(file_count, sizeof(file_count), "%zu", received_count);
     DrawTextEx(font, file_count, (Vector2) { 1214, 249 }, 12, 0.2f, UI_MUTED);
 
-    float total_len_height = received_files_count > 0
-        ? received_files_count * line_height + 8.0f
+    float total_len_height = received_count > 0
+        ? (float)received_count * line_height + 8.0f
         : panel_rec.height - 8.0f;
     Rectangle panel_content_rec = { 0, 0, panel_rec.width - 14, total_len_height };
 
@@ -473,7 +475,7 @@ void files_displaying(Font font)
     BeginScissorMode((int)panel_view.x, (int)panel_view.y, (int)panel_view.width, (int)panel_view.height);
     {
         float y_offset = 8.f;
-        if (received_files_count == 0) {
+        if (received_count == 0) {
             const char* empty = "Received files appear here";
             Vector2 empty_size = MeasureTextEx(font, empty, 13, spacing);
             DrawTextEx(font, empty,
@@ -481,7 +483,10 @@ void files_displaying(Font font)
                     panel_view.y + 120 },
                 13, spacing, UI_MUTED);
         } else {
-            for (int i = 0; i < received_files_count; i++) {
+            for (size_t i = 0; i < received_count; i++) {
+                ReceivedFileSnapshot received;
+                if (!file_transfer_received(transfers, i, &received))
+                    continue;
                 float y_pos = panel_view.y + y_offset + panel_scroll.y;
                 DrawRectangleRounded((Rectangle) { panel_view.x + 2, y_pos, panel_view.width - 8, 44 },
                     0.12f, 8, (Color) { 248, 250, 252, 255 });
@@ -493,7 +498,7 @@ void files_displaying(Font font)
                 GuiSetStyle(BUTTON, TEXT_COLOR_NORMAL, ColorToInt(UI_DANGER));
                 GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL, ColorToInt((Color) { 248, 250, 252, 255 }));
                 if (GuiButton((Rectangle) { panel_view.x + panel_view.width - 40, y_pos + 7, 28, 28 }, "x")) {
-                    remove_selected_file(received_files[i].filename);
+                    file_transfer_remove_received(transfers, received.filename);
                     GuiSetStyle(BUTTON, BASE_COLOR_NORMAL, previous_base);
                     GuiSetStyle(BUTTON, TEXT_COLOR_NORMAL, previous_text);
                     GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL, previous_border);
@@ -504,9 +509,10 @@ void files_displaying(Font font)
                 GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL, previous_border);
 
                 char size_str[32];
-                snprintf(size_str, sizeof(size_str), "%s", format_file_size(received_files[i].size));
+                snprintf(size_str, sizeof(size_str), "%s", format_file_size(received.size));
                 char display_name[40];
-                snprintf(display_name, sizeof(display_name), strlen(received_files[i].filename) > 28 ? "%.25s..." : "%s", received_files[i].filename);
+                snprintf(display_name, sizeof(display_name), strlen(received.filename) > 28
+                        ? "%.25s..." : "%s", received.filename);
                 DrawTextEx(font, display_name, (Vector2) { panel_view.x + 12, y_pos + 6 },
                     font_size, spacing, UI_NAVY);
                 DrawTextEx(font, size_str, (Vector2) { panel_view.x + 12, y_pos + 25 },
@@ -523,16 +529,15 @@ void files_displaying(Font font)
     GuiSetStyle(BUTTON, BASE_COLOR_NORMAL, ColorToInt((Color) { 255, 241, 242, 255 }));
     GuiSetStyle(BUTTON, TEXT_COLOR_NORMAL, ColorToInt(UI_DANGER));
     GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL, ColorToInt((Color) { 254, 205, 211, 255 }));
-    if (received_files_count > 0 && GuiButton((Rectangle) { 928, 638, 304, 36 }, "Clear received files")) {
-        remove_all_files();
-        scan_received_folder();
+    if (received_count > 0 && GuiButton((Rectangle) { 928, 638, 304, 36 }, "Clear received files")) {
+        file_transfer_clear_received(transfers);
     }
     GuiSetStyle(BUTTON, BASE_COLOR_NORMAL, prev_base);
     GuiSetStyle(BUTTON, TEXT_COLOR_NORMAL, prev_text);
     GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL, prev_border);
 }
 
-void draw_transfer_status(Font custom_font)
+void draw_transfer_status(Font custom_font, const FileTransferModule* transfers)
 {
     if (custom_font.baseSize == 0) {
         custom_font = GetFontDefault();
@@ -546,42 +551,33 @@ void draw_transfer_status(Font custom_font)
     DrawTextEx(custom_font, "ACTIVE TRANSFERS", (Vector2) { x + 12, y }, 11, 1.0f, UI_MUTED);
     y += 25;
     int shown = 0;
-    for (int i = 0; i < MAX_ACTIVE_TRANSFERS; ++i) {
-        OutgoingTransfer* t = &outgoing_transfers[i];
-        if (!t->active || shown >= 2)
+    size_t active_count = file_transfer_active_count(transfers);
+    for (size_t i = 0; i < active_count && shown < 2; ++i) {
+        FileTransferProgress transfer;
+        if (!file_transfer_progress(transfers, i, &transfer))
             continue;
-        float progress = t->total_bytes == 0 ? 0.0f : (float)t->sent_bytes / (float)t->total_bytes;
+        float progress = transfer.total_size == 0 ? 0.0f
+            : (float)transfer.transferred_size / (float)transfer.total_size;
         if (progress > 1.0f)
             progress = 1.0f;
         DrawRectangleRounded((Rectangle) { x + 12, y + 22, 280, 5 }, 0.5f, 6, UI_BORDER);
-        DrawRectangleRounded((Rectangle) { x + 12, y + 22, 280 * progress, 5 }, 0.5f, 6, UI_ACCENT);
+        Color color = transfer.direction == FILE_TRANSFER_SENDING ? UI_ACCENT : UI_SUCCESS;
+        DrawRectangleRounded((Rectangle) { x + 12, y + 22, 280 * progress, 5 }, 0.5f, 6,
+            color);
         char label[256];
-        snprintf(label, sizeof(label), "Sending  %.24s   %.0f%%", t->filename, progress * 100.0f);
-        DrawTextEx(custom_font, label, (Vector2) { x + 12, y }, 12, 0.1f, UI_SLATE);
-        y += 43;
-        shown++;
-    }
-
-    for (int i = 0; i < MAX_ACTIVE_TRANSFERS; ++i) {
-        IncomingTransfer* t = &incoming_transfers[i];
-        if (t->state != TRANSFER_STATE_ACCEPTED || shown >= 2)
-            continue;
-        float progress = t->total_bytes == 0 ? 0.0f : (float)t->received_bytes / (float)t->total_bytes;
-        if (progress > 1.0f)
-            progress = 1.0f;
-        DrawRectangleRounded((Rectangle) { x + 12, y + 22, 280, 5 }, 0.5f, 6, UI_BORDER);
-        DrawRectangleRounded((Rectangle) { x + 12, y + 22, 280 * progress, 5 }, 0.5f, 6, UI_SUCCESS);
-        char label[256];
-        snprintf(label, sizeof(label), "Receiving  %.22s   %.0f%%", t->filename, progress * 100.0f);
+        snprintf(label, sizeof(label), "%s  %.22s   %.0f%%",
+            transfer.direction == FILE_TRANSFER_SENDING ? "Sending" : "Receiving",
+            transfer.filename, progress * 100.0f);
         DrawTextEx(custom_font, label, (Vector2) { x + 12, y }, 12, 0.1f, UI_SLATE);
         y += 43;
         shown++;
     }
 }
 
-void draw_pending_transfers(Font custom_font, struct ClientConnection* conn)
+void draw_pending_transfers(Font custom_font, FileTransferModule* transfers,
+    const RelayTransport* transport)
 {
-    int pending_count = get_pending_transfer_count();
+    size_t pending_count = file_transfer_pending_count(transfers);
     if (pending_count == 0)
         return;
 
@@ -601,9 +597,8 @@ void draw_pending_transfers(Font custom_font, struct ClientConnection* conn)
     // Draw dialog background
     draw_card((Rectangle) { dialog_x, dialog_y, dialog_width, dialog_height }, 0.05f);
 
-    // Get the first pending transfer
-    IncomingTransfer* transfer = get_pending_transfer(0);
-    if (!transfer)
+    FileOfferSnapshot transfer;
+    if (!file_transfer_pending(transfers, 0, &transfer))
         return;
 
     // Title
@@ -619,25 +614,25 @@ void draw_pending_transfers(Font custom_font, struct ClientConnection* conn)
     char info_line1[512];
     DrawRectangleRounded((Rectangle) { dialog_x + 24, dialog_y + 86, dialog_width - 48, 92 },
         0.08f, 8, (Color) { 248, 250, 252, 255 });
-    snprintf(info_line1, sizeof(info_line1), "%.60s", transfer->filename);
+    snprintf(info_line1, sizeof(info_line1), "%.60s", transfer.filename);
     DrawTextEx(custom_font, info_line1,
         (Vector2) { dialog_x + 42, dialog_y + 101 }, 16, 0.1f, UI_NAVY);
 
     char info_line2[256];
-    snprintf(info_line2, sizeof(info_line2), "From %.40s", transfer->sender);
+    snprintf(info_line2, sizeof(info_line2), "From %.40s", transfer.sender_name);
     DrawTextEx(custom_font, info_line2,
         (Vector2) { dialog_x + 42, dialog_y + 132 }, 13, 0.1f, UI_MUTED);
 
     char info_line3[128];
     snprintf(info_line3, sizeof(info_line3), "Size: %.2f MB",
-        transfer->total_bytes / (1024.0 * 1024.0));
+        transfer.total_size / (1024.0 * 1024.0));
     DrawTextEx(custom_font, info_line3,
         (Vector2) { dialog_x + dialog_width - 145, dialog_y + 132 }, 13, 0.1f, UI_MUTED);
 
     // Pending count indicator
     if (pending_count > 1) {
         char pending_text[64];
-        snprintf(pending_text, sizeof(pending_text), "+%d more pending", pending_count - 1);
+        snprintf(pending_text, sizeof(pending_text), "+%zu more pending", pending_count - 1u);
         DrawTextEx(custom_font, pending_text,
             (Vector2) { dialog_x + dialog_width - 135, dialog_y + 30 }, 13, 0.1f, UI_MUTED);
     }
@@ -662,27 +657,7 @@ void draw_pending_transfers(Font custom_font, struct ClientConnection* conn)
     GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL, ColorToInt(UI_SUCCESS));
 
     if (GuiButton((Rectangle) { btn_start_x, btn_y, btn_width, btn_height }, "Save to received")) {
-        // Save file_id and sender before accept modifies transfer state
-        char file_id_copy[FILE_ID_LEN];
-        char sender_copy[256];
-        strncpy(file_id_copy, transfer->file_id, sizeof(file_id_copy) - 1);
-        file_id_copy[sizeof(file_id_copy) - 1] = '\0';
-        strncpy(sender_copy, transfer->sender, sizeof(sender_copy) - 1);
-        sender_copy[sizeof(sender_copy) - 1] = '\0';
-
-        accept_incoming_transfer(transfer, "received");
-        // Send FILE_ACCEPT to sender so they can start sending chunks
-        if (conn && atomic_load(&conn->connected)) {
-            char response[512];
-            uint8_t response_type = transfer->state == TRANSFER_STATE_ACCEPTED
-                ? PACKET_TYPE_FILE_ACCEPT
-                : PACKET_TYPE_FILE_ABORT;
-            if (response_type == PACKET_TYPE_FILE_ACCEPT)
-                snprintf(response, sizeof(response), "%s|%s", sender_copy, file_id_copy);
-            else
-                snprintf(response, sizeof(response), "%s|%s|Could not create destination", sender_copy, file_id_copy);
-            send_packet((ClientConnection*)conn, response_type, response, (uint32_t)strlen(response));
-        }
+        (void)file_transfer_respond(transfers, transport, transfer.offer_id, true, "received");
     }
 
     // Choose folder button - Blue
@@ -692,31 +667,8 @@ void draw_pending_transfers(Font custom_font, struct ClientConnection* conn)
 
     if (GuiButton((Rectangle) { btn_start_x + btn_width + btn_spacing, btn_y, btn_width, btn_height }, "Choose folder")) {
         const char* folder = tinyfd_selectFolderDialog("Select Save Location", "received");
-        if (folder) {
-            // Save file_id and sender before accept modifies transfer state
-            char file_id_copy[FILE_ID_LEN];
-            char sender_copy[256];
-            strncpy(file_id_copy, transfer->file_id, sizeof(file_id_copy) - 1);
-            file_id_copy[sizeof(file_id_copy) - 1] = '\0';
-            strncpy(sender_copy, transfer->sender, sizeof(sender_copy) - 1);
-            sender_copy[sizeof(sender_copy) - 1] = '\0';
-
-            accept_incoming_transfer(transfer, folder);
-
-            // Send FILE_ACCEPT to sender so they can start sending chunks
-            if (conn && atomic_load(&conn->connected)) {
-                char response[512];
-                uint8_t response_type = transfer->state == TRANSFER_STATE_ACCEPTED
-                    ? PACKET_TYPE_FILE_ACCEPT
-                    : PACKET_TYPE_FILE_ABORT;
-                if (response_type == PACKET_TYPE_FILE_ACCEPT)
-                    snprintf(response, sizeof(response), "%s|%s", sender_copy, file_id_copy);
-                else
-                    snprintf(response, sizeof(response), "%s|%s|Could not create destination", sender_copy, file_id_copy);
-                send_packet((ClientConnection*)conn, response_type, response, (uint32_t)strlen(response));
-            }
-        }
-        // If user cancels folder dialog, do nothing (stay pending)
+        if (folder)
+            (void)file_transfer_respond(transfers, transport, transfer.offer_id, true, folder);
     }
 
     // Reject button - Red
@@ -725,16 +677,7 @@ void draw_pending_transfers(Font custom_font, struct ClientConnection* conn)
     GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL, ColorToInt((Color) { 254, 205, 211, 255 }));
 
     if (GuiButton((Rectangle) { btn_start_x + (btn_width + btn_spacing) * 2, btn_y, btn_width, btn_height }, "Reject")) {
-        reject_incoming_transfer(transfer);
-        // Send FILE_ABORT to sender
-        if (conn && atomic_load(&conn->connected)) {
-            char abort_msg[512];
-            snprintf(abort_msg, sizeof(abort_msg), "%s|%s|Rejected by recipient",
-                transfer->sender, transfer->file_id);
-            send_packet((ClientConnection*)conn, PACKET_TYPE_FILE_ABORT, abort_msg, (uint32_t)strlen(abort_msg));
-        }
-        // Clear the transfer slot
-        memset(transfer, 0, sizeof(*transfer));
+        (void)file_transfer_respond(transfers, transport, transfer.offer_id, false, NULL);
     }
 
     // Restore button styles
